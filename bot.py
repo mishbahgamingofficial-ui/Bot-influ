@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.tl.types import UpdateBotChatInviteRequester
 
-# 1. Setup Advanced Logging
+# Setup Advanced Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -16,20 +16,20 @@ logger = logging.getLogger("MyTelegramBot")
 
 load_dotenv()
 
-# 2. Fetch Environment Variables
+# Fetch Environment Variables
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", 10000))
 
-# 3. Create Event Loop for Telethon
+# Create Event Loop for Telethon
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
-# 4. Initialize Telegram Client
+# Initialize Telegram Client
 client = TelegramClient('bot_session', API_ID, API_HASH, loop=loop)
 
-# 5. Background Web Server (Render Health Check Trick)
+# Background Web Server (Render Health Check Trick)
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -38,7 +38,6 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is Live and Running!")
         
     def log_message(self, format, *args):
-        # Keeps the Render logs clean by hiding constant ping messages
         pass
 
 def start_web_server():
@@ -49,53 +48,48 @@ def start_web_server():
     except Exception as e:
         logger.error(f"❌ Web server failed to start: {e}")
 
-# 6. Event Listener: When a user directly joins or is added
+# Event Listener: When a user directly joins or is added
 @client.on(events.ChatAction())
 async def handle_join_request(event):
-    """Detects when a user joins the channel and sends a DM."""
     try:
         if event.user_joined or event.user_added:
             user = await event.get_user()
             
-            welcome_msg = (
-                "⏳ **Admin is busy right now!**\n\n"
-                "Please wait for approval... Thank you for your patience! 😊"
-            )
+            # 1. Pehle Text Message Jayega
+            text_msg = "⏳ **Admin is busy right now!**\n\nPlease wait for approval... Thank you for your patience! 😊"
+            await client.send_message(user.id, text_msg)
             
-            await client.send_message(user.id, welcome_msg)
-            logger.info(f"✅ Success: Sent DM to joined user {user.first_name} (ID: {user.id})")
+            # 2. Phir File Jayegi (Yahan apni file ka exact naam daal)
+            await client.send_file(user.id, 'YOUR_FILE_NAME.pdf', caption="Here is your file! 📂")
+            logger.info(f"✅ Success: Sent Message and File to joined user {user.first_name}")
             
     except Exception as e:
-        logger.error(f"❌ Failed to handle user join: {e}")
+        logger.error(f"❌ Failed to send message/file to joined user: {e}")
 
-# 7. Event Listener: When a user sends a "Join Request" (Pending Approval)
+# Event Listener: When a user sends a "Join Request" (Pending Approval)
 @client.on(events.Raw)
 async def raw_join_request_handler(event):
-    """Detects when a user clicks 'Request to Join' via an invite link."""
     if isinstance(event, UpdateBotChatInviteRequester):
         try:
             user_id = event.user_id
             
-            welcome_msg = (
-                "⏳ **Admin is busy right now!**\n\n"
-                "Your request has been received. Please wait for approval... Thank you for your patience! 😊"
-            )
+            # 1. Pehle Text Message Jayega
+            text_msg = "⏳ **Admin is busy right now!**\n\nYour request has been received. Please wait for approval..."
+            await client.send_message(user_id, text_msg)
             
-            await client.send_message(user_id, welcome_msg)
-            logger.info(f"✅ Success: Sent DM to Join Requester (ID: {user_id})")
+            # 2. Phir File Jayegi (Yahan apni file ka exact naam daal)
+            await client.send_file(user_id, 'YOUR_FILE_NAME.pdf', caption="Here is your file! 📂")
+            logger.info(f"✅ Success: Sent Message and File to Join Requester")
             
         except Exception as e:
-            logger.error(f"❌ Failed to send DM to Join Requester: {e}")
+            logger.error(f"❌ Failed to send message/file to Join Requester: {e}")
 
-# 8. Main Bot Function
+# Main Bot Function
 async def main():
-    # Start the web server in a background thread
     threading.Thread(target=start_web_server, daemon=True).start()
-    
     logger.info("🤖 Starting the Telegram Bot...")
     await client.start(bot_token=BOT_TOKEN)
-    
-    logger.info("✅ Bot is online, watching the channel, and ready to send DMs!")
+    logger.info("✅ Bot is online, watching channel, and ready to send Message + File!")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
