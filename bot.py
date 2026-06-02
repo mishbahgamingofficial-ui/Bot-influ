@@ -2,28 +2,40 @@ import os
 import asyncio
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 
 load_dotenv()
 
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+PORT = int(os.environ.get("PORT", 10000))  # Render automatically provides this env var
 
-# 1. Create and set an event loop explicitly before creating the client
+# Create and set event loop
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
-# 2. Pass the loop directly to the TelegramClient
 client = TelegramClient('bot_session', API_ID, API_HASH, loop=loop)
+
+# Simple HTTP handler to reply "OK" to Render's port scanner
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+def run_health_check_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthCheckHandler)
+    print(f"🌐 Health check server listening on port {PORT}")
+    server.serve_forever()
 
 @client.on(events.ChatAction())
 async def handle_join_request(event):
-    """Handle user join requests"""
     try:
-        # Check if it's a user joining the channel
         if event.user_joined or event.user_added:
             user = await event.get_user()
-            # Send welcome message to the user
             await client.send_message(
                 user.id,
                 "⏳ Admin is busy right now!\n\nPlease wait for approval... Thank you for your patience! 😊"
@@ -33,8 +45,16 @@ async def handle_join_request(event):
         print(f"❌ Error: {e}")
 
 async def main():
+    # Start the fake web server in a background thread so Render sees an open port
+    threading.Thread(target=run_health_check_server, daemon=True).start()
+
     print("🤖 Bot Starting...")
     await client.start(bot_token=BOT_TOKEN)
+    print("✅ Bot is running and listening for join requests...")
+    await client.run_until_disconnected()
+
+if __name__ == "__main__":
+    loop.run_until_complete(main())    await client.start(bot_token=BOT_TOKEN)
     print("✅ Bot is running and listening for join requests...")
     await client.run_until_disconnected()
 
