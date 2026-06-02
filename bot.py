@@ -9,7 +9,12 @@ API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-client = TelegramClient('bot_session', API_ID, API_HASH)
+# 1. Create and set an event loop explicitly before creating the client
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+# 2. Pass the loop directly to the TelegramClient
+client = TelegramClient('bot_session', API_ID, API_HASH, loop=loop)
 
 @client.on(events.ChatAction())
 async def handle_join_request(event):
@@ -34,4 +39,5 @@ async def main():
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # 3. Use the loop we created at the top to run the program
+    loop.run_until_complete(main())
