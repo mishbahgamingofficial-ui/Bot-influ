@@ -5,6 +5,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
+from telethon.tl.types import UpdateBotChatInviteRequester
 
 # 1. Setup Advanced Logging
 logging.basicConfig(
@@ -48,7 +49,7 @@ def start_web_server():
     except Exception as e:
         logger.error(f"❌ Web server failed to start: {e}")
 
-# 6. Event Listener: When a user joins or is added
+# 6. Event Listener: When a user directly joins or is added
 @client.on(events.ChatAction())
 async def handle_join_request(event):
     """Detects when a user joins the channel and sends a DM."""
@@ -56,19 +57,37 @@ async def handle_join_request(event):
         if event.user_joined or event.user_added:
             user = await event.get_user()
             
-            # The message that will be sent to the user's DM
             welcome_msg = (
                 "⏳ **Admin is busy right now!**\n\n"
                 "Please wait for approval... Thank you for your patience! 😊"
             )
             
             await client.send_message(user.id, welcome_msg)
-            logger.info(f"✅ Success: Sent DM to {user.first_name} (ID: {user.id})")
+            logger.info(f"✅ Success: Sent DM to joined user {user.first_name} (ID: {user.id})")
             
     except Exception as e:
         logger.error(f"❌ Failed to handle user join: {e}")
 
-# 7. Main Bot Function
+# 7. Event Listener: When a user sends a "Join Request" (Pending Approval)
+@client.on(events.Raw)
+async def raw_join_request_handler(event):
+    """Detects when a user clicks 'Request to Join' via an invite link."""
+    if isinstance(event, UpdateBotChatInviteRequester):
+        try:
+            user_id = event.user_id
+            
+            welcome_msg = (
+                "⏳ **Admin is busy right now!**\n\n"
+                "Your request has been received. Please wait for approval... Thank you for your patience! 😊"
+            )
+            
+            await client.send_message(user_id, welcome_msg)
+            logger.info(f"✅ Success: Sent DM to Join Requester (ID: {user_id})")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to send DM to Join Requester: {e}")
+
+# 8. Main Bot Function
 async def main():
     # Start the web server in a background thread
     threading.Thread(target=start_web_server, daemon=True).start()
