@@ -7,107 +7,108 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.tl.types import UpdateBotChatInviteRequester
 
-# 1. Setup Advanced Logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Setup Advanced Logging
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger("MyTelegramBot")
 
 load_dotenv()
 
-# 2. Fetch Environment Variables
+# Fetch Environment Variables
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", 10000))
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0)) # Apni Telegram ID yahan daalna env me
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 
-# 3. Global Variables (Default Messages & Files)
-# Ye bot restart hone par default par aa jayega, par live bot me admin kabhi bhi badal sakta hai
-welcome_text = "⏳ **Admin is busy right now!**\n\nPlease wait for approval... Thank you for your patience! 😊"
-target_file = 'YOUR_FILE_NAME.pdf'  # Local file name jo GitHub par hai
-stored_file_id = None                # Admin agar nayi file bhejega toh uski Telegram ID yahan save hogi
+# ==========================================
+# STARTING ME SAB KHALI (No Defaults)
+# ==========================================
+welcome_text = None
+stored_file_id = None
+stored_file_caption = None
 
 # Create Event Loop for Telethon
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
-
-# Initialize Telegram Client
 client = TelegramClient('bot_session', API_ID, API_HASH, loop=loop)
 
-# 4. Background Web Server (Render Health Check)
+# Background Web Server (Render Health Check Trick)
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot is Live and Running with Admin Panel!")
+        self.wfile.write(b"Bot is Live and waiting for Admin commands!")
     def log_message(self, format, *args):
         pass
 
 def start_web_server():
     try:
         server = HTTPServer(("0.0.0.0", PORT), KeepAliveHandler)
-        logger.info(f"🌐 Background web server listening on PORT {PORT}")
         server.serve_forever()
     except Exception as e:
         logger.error(f"❌ Web server failed to start: {e}")
 
-# 5. ADMIN COMMANDS PANEL
-# Command to change text message: /setmsg <new message>
-@client.on(events.NewMessage(pattern='/setmsg (.+)', incoming=True))
+# ==========================================
+# ADMIN COMMANDS PANEL
+# ==========================================
+
+@client.on(events.NewMessage(pattern=r'^/setmsg(?: (.*))?', incoming=True))
 async def change_message(event):
     global welcome_text
     if event.sender_id == ADMIN_ID:
-        welcome_text = event.pattern_match.group(1)
-        await event.reply("✅ **Welcome message successfully update ho gaya hai!**")
-        logger.info("Admin updated the welcome text.")
+        new_text = event.pattern_match.group(1)
+        if new_text and new_text.strip():
+            welcome_text = new_text.strip()
+            await event.reply("✅ **Text message set ho gaya hai!**\nAb users ko ye message jayega.")
+        else:
+            welcome_text = None
+            await event.reply("✅ **Text message remove kar diya gaya hai!**\nAb alag se koi text nahi jayega.")
     else:
         await event.reply("❌ Aap is bot ke admin nahi hain!")
 
-# Command to change file: Send any file/document and reply /setfile to it
 @client.on(events.NewMessage(pattern='/setfile', incoming=True))
 async def change_file(event):
-    global stored_file_id
+    global stored_file_id, stored_file_caption
     if event.sender_id == ADMIN_ID:
         if event.is_reply:
             reply_msg = await event.get_reply_message()
-            if reply_msg.file:
-                # Telegram File ID ko save kar rahe hain taaki Render delete na kar paye
+            if reply_msg.media:
                 stored_file_id = reply_msg.media
-                await event.reply("✅ **Nayi file successfully set ho gayi hai! Ab users ko yahi file jayegi.**")
-                logger.info("Admin updated the target file using Telegram Media ID.")
+                # Original video/file ka caption yahan copy hoga
+                stored_file_caption = reply_msg.text or "" 
+                await event.reply("✅ **Nayi file (aur uska original caption) set ho gayi hai!**")
             else:
-                await event.reply("❌ Jis message ka aapne reply kiya hai usme koi file nahi hai!")
+                await event.reply("❌ Jis message ka aapne reply kiya hai usme koi media/file nahi hai!")
         else:
-            await event.reply("ℹ️ **Kaise use karein:** Pehle bot ko wo file bhejin, phir us file par reply karke `/setfile` likhein.")
+            # Agar bina reply ke likha toh file hat jayegi
+            stored_file_id = None
+            stored_file_caption = None
+            await event.reply("✅ **File remove kar di gayi hai!**\nAb users ko koi file nahi jayegi.")
     else:
         await event.reply("❌ Aap is bot ke admin nahi hain!")
 
-# Command to check current settings: /status
 @client.on(events.NewMessage(pattern='/status', incoming=True))
 async def bot_status(event):
     if event.sender_id == ADMIN_ID:
-        file_status = "Custom Admin File (Telegram ID)" if stored_file_id else f"Default Local File ({target_file})"
-        status_msg = (
-            "⚙️ **Current Bot Status:**\n\n"
-            f"💬 **Message:**\n{welcome_text}\n\n"
-            f"📂 **File Type:** {file_status}"
-        )
+        msg_status = welcome_text if welcome_text else "❌ Koi alag text message set nahi hai"
+        file_status = "✅ File set hai (with original caption)" if stored_file_id else "❌ Koi file set nahi hai"
+        status_msg = f"⚙️ **Current Bot Status:**\n\n💬 **Message:**\n{msg_status}\n\n📂 **File:** {file_status}"
         await event.reply(status_msg)
 
-# 6. USER JOIN HANDLERS (Sending Text + File)
+# ==========================================
+# USER JOIN HANDLERS
+# ==========================================
 async def send_welcome_package(user_id, first_name):
     try:
-        # 1. Send Text Message
-        await client.send_message(user_id, welcome_text)
+        # 1. Agar admin ne text set kiya hai, tabhi bhejo
+        if welcome_text:
+            await client.send_message(user_id, welcome_text)
         
-        # 2. Send File (Check if Admin changed it via Telegram ID or using local file)
-        file_to_send = stored_file_id if stored_file_id else target_file
-        await client.send_file(user_id, file_to_send, caption="Here is your requested file! 📂")
-        
-        logger.info(f"✅ Success: Sent Message + File to {first_name} (ID: {user_id})")
+        # 2. Agar admin ne file set ki hai, tabhi bhejo (original caption ke sath)
+        if stored_file_id:
+            await client.send_file(user_id, stored_file_id, caption=stored_file_caption)
+            
     except Exception as e:
         logger.error(f"❌ Failed to send package to {user_id}: {e}")
 
@@ -122,18 +123,15 @@ async def raw_join_request_handler(event):
     if isinstance(event, UpdateBotChatInviteRequester):
         await send_welcome_package(event.user_id, "Join Requester")
 
-# 7. Main Bot Function
+# Main Bot Function
 async def main():
     threading.Thread(target=start_web_server, daemon=True).start()
-    logger.info("🤖 Starting the Telegram Bot with Admin Controls...")
+    logger.info("🤖 Bot Started! Waiting for Admin setup...")
     await client.start(bot_token=BOT_TOKEN)
-    logger.info("✅ Bot is online! Admins can use /setmsg and /setfile commands in bot DM.")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
     try:
         loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        logger.info("🛑 Bot stopped manually.")
     except Exception as e:
-        logger.critical(f"💀 Fatal error: {e}")
+        pass
