@@ -10,7 +10,7 @@ load_dotenv()
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-PORT = int(os.environ.get("PORT", 10000))  # Render automatically provides this env var
+PORT = int(os.environ.get("PORT", 10000))
 
 # Create and set event loop
 loop = asyncio.new_event_loop()
@@ -35,6 +35,14 @@ def run_health_check_server():
 async def handle_join_request(event):
     try:
         if event.user_joined or event.user_added:
+            user = await event.get_user()
+            await client.send_message(
+                user.id,
+                "⏳ Admin is busy right now!\n\nPlease wait for approval... Thank you for your patience! 😊"
+            )
+            print(f"✅ Auto-reply sent to {user.first_name} (ID: {user.id})")
+    except Exception as e:
+        print        if event.user_joined or event.user_added:
             user = await event.get_user()
             await client.send_message(
                 user.id,
