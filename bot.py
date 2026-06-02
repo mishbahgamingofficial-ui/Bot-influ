@@ -1,7 +1,7 @@
 from pyrogram import Client
 from pyrogram.handlers import ChatJoinRequestHandler
 
-API_ID = 12345678      # apna api_id
+API_ID = 24223583      # apna api_id
 API_HASH = "your_api_hash"
 BOT_TOKEN = "your_bot_token"
 
