@@ -2,8 +2,8 @@ from pyrogram import Client
 from pyrogram.handlers import ChatJoinRequestHandler
 
 API_ID = 24223583      # apna api_id
-API_HASH = "your_api_hash"
-BOT_TOKEN = "your_bot_token"
+API_HASH = "8601a6f42f20a392f241bd33b8bf6b10"
+BOT_TOKEN = "8212126889:AAGWBN6dMhyufJU51KlbRG94PGeW3IgEYPo"
 
 app = Client(
     "joinbot",
