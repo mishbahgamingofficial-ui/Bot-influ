@@ -1,10 +1,14 @@
 import os
+import asyncio
+from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.handlers import ChatJoinRequestHandler
 
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+load_dotenv()
+
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
 app = Client(
     "join_bot",
@@ -23,7 +27,13 @@ async def join_request_handler(client, join_request):
     except Exception as e:
         print(f"Error: {e}")
 
-app.add_handler(ChatJoinRequestHandler(join_request_handler))
+async def main():
+    app.add_handler(ChatJoinRequestHandler(join_request_handler))
+    print("Bot Started...")
+    async with app:
+        await app.start()
+        print("Bot is running...")
+        await asyncio.Event().wait()
 
-print("Bot Started...")
-app.run()
+if __name__ == "__main__":
+    asyncio.run(main())
