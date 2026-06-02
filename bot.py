@@ -86,11 +86,3 @@ if __name__ == "__main__":
         logger.info("🛑 Bot stopped manually by user.")
     except Exception as e:
         logger.critical(f"💀 Fatal error occurred: {e}")
-if __name__ == "__main__":
-    loop.run_until_complete(main())    await client.start(bot_token=BOT_TOKEN)
-    print("✅ Bot is running and listening for join requests...")
-    await client.run_until_disconnected()
-
-if __name__ == "__main__":
-    # 3. Use the loop we created at the top to run the program
-    loop.run_until_complete(main())
