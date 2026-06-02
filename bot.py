@@ -20,12 +20,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", 10000))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 
-# ==========================================
-# STARTING ME SAB KHALI (No Defaults)
-# ==========================================
-welcome_text = None
-stored_file_id = None
-stored_file_caption = None
+# Global dictionary to store sequence of messages
+saved_messages = {}
 
 # Create Event Loop for Telethon
 loop = asyncio.new_event_loop()
@@ -38,7 +34,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot is Live and waiting for Admin commands!")
+        self.wfile.write(b"Bot Sequence System is Live!")
     def log_message(self, format, *args):
         pass
 
@@ -50,67 +46,92 @@ def start_web_server():
         logger.error(f"❌ Web server failed to start: {e}")
 
 # ==========================================
-# ADMIN COMMANDS PANEL
+# ADVANCED DYNAMIC ADMIN COMMANDS
 # ==========================================
 
-@client.on(events.NewMessage(pattern=r'^/setmsg(?: (.*))?', incoming=True))
-async def change_message(event):
-    global welcome_text
-    if event.sender_id == ADMIN_ID:
-        new_text = event.pattern_match.group(1)
-        if new_text and new_text.strip():
-            welcome_text = new_text.strip()
-            await event.reply("✅ **Text message set ho gaya hai!**\nAb users ko ye message jayega.")
-        else:
-            welcome_text = None
-            await event.reply("✅ **Text message remove kar diya gaya hai!**\nAb alag se koi text nahi jayega.")
-    else:
+# Pattern matches /setmsg1, /setmsg2, /setmsg10 etc.
+@client.on(events.NewMessage(pattern=r'^/setmsg(\d+)(?:\s+(.+))?', incoming=True))
+async def set_message_step(event):
+    global saved_messages
+    if event.sender_id != ADMIN_ID:
         await event.reply("❌ Aap is bot ke admin nahi hain!")
-
-@client.on(events.NewMessage(pattern='/setfile', incoming=True))
-async def change_file(event):
-    global stored_file_id, stored_file_caption
-    if event.sender_id == ADMIN_ID:
-        if event.is_reply:
-            reply_msg = await event.get_reply_message()
-            if reply_msg.media:
-                stored_file_id = reply_msg.media
-                # Original video/file ka caption yahan copy hoga
-                stored_file_caption = reply_msg.text or "" 
-                await event.reply("✅ **Nayi file (aur uska original caption) set ho gayi hai!**")
-            else:
-                await event.reply("❌ Jis message ka aapne reply kiya hai usme koi media/file nahi hai!")
-        else:
-            # Agar bina reply ke likha toh file hat jayegi
-            stored_file_id = None
-            stored_file_caption = None
-            await event.reply("✅ **File remove kar di gayi hai!**\nAb users ko koi file nahi jayegi.")
+        return
+    
+    # Extract step number and extra text if any
+    step_num = int(event.pattern_match.group(1))
+    extra_text = event.pattern_match.group(2)
+    
+    # CASE 1: Admin replied to a message (Forward Mode)
+    if event.is_reply:
+        reply_msg = await event.get_reply_message()
+        saved_messages[step_num] = {
+            'type': 'forward',
+            'msg_id': reply_msg.id,
+            'from_chat': event.chat_id
+        }
+        await event.reply(f"✅ **Message {step_num} set ho gaya hai (Forward Mode)!**\nBando ko ye asli message forward kiya jayega.")
+        logger.info(f"Admin set step {step_num} as forward message.")
+        
+    # CASE 2: Admin typed text directly after command
+    elif extra_text and extra_text.strip():
+        saved_messages[step_num] = {
+            'type': 'text',
+            'text': extra_text.strip()
+        }
+        await event.reply(f"✅ **Message {step_num} set ho gaya hai (Text Mode)!**")
+        logger.info(f"Admin set step {step_num} as plain text.")
+        
+    # CASE 3: Clean command with no text and no reply (Delete Mode)
     else:
-        await event.reply("❌ Aap is bot ke admin nahi hain!")
+        if step_num in saved_messages:
+            del saved_messages[step_num]
+            await event.reply(f"✅ **Message {step_num} ko sequence se remove kar diya gaya hai!**")
+            logger.info(f"Admin removed step {step_num}.")
+        else:
+            await event.reply(f"❌ Message {step_num} pehle se hi khali hai.")
 
+# Command to check current sequence status: /status
 @client.on(events.NewMessage(pattern='/status', incoming=True))
 async def bot_status(event):
     if event.sender_id == ADMIN_ID:
-        msg_status = welcome_text if welcome_text else "❌ Koi alag text message set nahi hai"
-        file_status = "✅ File set hai (with original caption)" if stored_file_id else "❌ Koi file set nahi hai"
-        status_msg = f"⚙️ **Current Bot Status:**\n\n💬 **Message:**\n{msg_status}\n\n📂 **File:** {file_status}"
-        await event.reply(status_msg)
+        if not saved_messages:
+            await event.reply("⚙️ **Bot Status:**\n❌ Abhi koi bhi message sequence set nahi hai. Bot shuru me khali hai.")
+            return
+        
+        status_text = "⚙️ **Current Bot Message Sequence:**\n\n"
+        # Sort keys to show proper order
+        for step in sorted(saved_messages.keys()):
+            m_type = saved_messages[step]['type']
+            status_text += f"🔹 **Step {step}** -> Type: `{m_type.upper()}`\n"
+        
+        status_text += "\n👉 Aap inhe `/setmsg<number>` se change ya delete kar sakte hain."
+        await event.reply(status_text)
 
 # ==========================================
-# USER JOIN HANDLERS
+# AUTOMATIC USER JOIN SEQUENCE SENDER
 # ==========================================
 async def send_welcome_package(user_id, first_name):
     try:
-        # 1. Agar admin ne text set kiya hai, tabhi bhejo
-        if welcome_text:
-            await client.send_message(user_id, welcome_text)
+        if not saved_messages:
+            logger.info(f"No messages configured. Skipped sending to {user_id}")
+            return
         
-        # 2. Agar admin ne file set ki hai, tabhi bhejo (original caption ke sath)
-        if stored_file_id:
-            await client.send_file(user_id, stored_file_id, caption=stored_file_caption)
+        # Loop through messages in sorted order (1, 2, 3...)
+        for step in sorted(saved_messages.keys()):
+            item = saved_messages[step]
             
+            if item['type'] == 'forward':
+                # Exact forward logic to retain premium emojis and media layout
+                await client.forward_messages(user_id, item['msg_id'], item['from_chat'])
+            elif item['type'] == 'text':
+                await client.send_message(user_id, item['text'])
+                
+            # 1 second ka gap taaki telegram flood error na de aur sequence sahi rahe
+            await asyncio.sleep(1)
+            
+        logger.info(f"✅ Success: Sent full sequence to {first_name} (ID: {user_id})")
     except Exception as e:
-        logger.error(f"❌ Failed to send package to {user_id}: {e}")
+        logger.error(f"❌ Failed to send sequence to {user_id}: {e}")
 
 @client.on(events.ChatAction())
 async def handle_chat_action(event):
@@ -126,7 +147,7 @@ async def raw_join_request_handler(event):
 # Main Bot Function
 async def main():
     threading.Thread(target=start_web_server, daemon=True).start()
-    logger.info("🤖 Bot Started! Waiting for Admin setup...")
+    logger.info("🤖 Bot Started with Dynamic Multi-Message Forwarding System!")
     await client.start(bot_token=BOT_TOKEN)
     await client.run_until_disconnected()
 
