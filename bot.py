@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.tl.types import UpdateBotChatInviteRequester
+from telethon.errors import UserIsBlockedError  # Blocked users pakadne ke liye
 
 # Setup Advanced Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -24,9 +25,10 @@ PORT = int(os.environ.get("PORT", 10000))
 raw_admins = os.environ.get("ADMIN_IDS", "0")
 ADMIN_IDS = [int(admin.strip()) for admin in raw_admins.split(",") if admin.strip().isdigit()]
 
-# In-Memory Database (Will reset on Render spin-down, so use /backup!)
+# In-Memory Database (Resets on Render spin-down, use /backup & /restore!)
 saved_messages = {}
-tracked_users = set()
+tracked_users = set()  # Active Users
+blocked_users = set()  # Blocked Users
 
 # Create Event Loop for Telethon
 loop = asyncio.new_event_loop()
@@ -39,7 +41,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot System is Live!")
+        self.wfile.write(b"Bot Tracking System is Live!")
     def log_message(self, format, *args):
         pass
 
@@ -75,26 +77,48 @@ async def set_message_step(event):
             del saved_messages[step_num]
             await event.reply(f"✅ Message {step_num} remove ho gaya.")
 
+# NAYA COMMAND: /users (Active aur Blocked users dekhne ke liye)
+@client.on(events.NewMessage(pattern='/users', incoming=True))
+async def show_users_stats(event):
+    if event.sender_id not in ADMIN_IDS:
+        return
+    
+    stats_msg = (
+        "📊 **Bot User Statistics:**\n\n"
+        f"🟢 **Active Users:** {len(tracked_users)}\n"
+        f"🔴 **Blocked Users:** {len(blocked_users)}\n\n"
+        f"💡 *Note:* Blocked users ka list tabhi update hota hai jab aap `/broadcast` chalate hain aur bot unhe message nahi bhej pata."
+    )
+    await event.reply(stats_msg)
+
 # ==========================================
-# BACKUP & BROADCAST SYSTEM
+# BACKUP & RESTORE SYSTEM (With Blocked Support)
 # ==========================================
 
 @client.on(events.NewMessage(pattern='/backup', incoming=True))
 async def backup_data(event):
-    """Sends a JSON backup of all tracked users to the admin."""
     if event.sender_id not in ADMIN_IDS:
         return
     
+    # Dono lists ko ek sath dictionary me save karenge
+    backup_dict = {
+        "tracked": list(tracked_users),
+        "blocked": list(blocked_users)
+    }
+    
     with open("users_backup.json", "w") as f:
-        json.dump(list(tracked_users), f)
+        json.dump(backup_dict, f)
         
-    await client.send_file(event.chat_id, "users_backup.json", caption="📁 **Here is your User Database Backup.**\nSave this file. If the bot restarts, send this file back and reply to it with `/restore`.")
+    await client.send_file(
+        event.chat_id, 
+        "users_backup.json", 
+        caption="📁 **Here is your updated User Database Backup.**\n\nIsme Active aur Blocked dono users saved hain."
+    )
     os.remove("users_backup.json")
 
 @client.on(events.NewMessage(pattern='/restore', incoming=True))
 async def restore_data(event):
-    """Restores the user database from a JSON file."""
-    global tracked_users
+    global tracked_users, blocked_users
     if event.sender_id not in ADMIN_IDS:
         return
         
@@ -105,30 +129,44 @@ async def restore_data(event):
             try:
                 with open(file_path, "r") as f:
                     data = json.load(f)
-                    tracked_users.update(data)
-                await event.reply(f"✅ **Database Restored Successfully!**\nTotal Users now: {len(tracked_users)}")
+                    
+                    # Check karo ki naya dict format hai ya purana list format
+                    if isinstance(data, dict):
+                        tracked_users.update(data.get("tracked", []))
+                        blocked_users.update(data.get("blocked", []))
+                    elif isinstance(data, list):
+                        tracked_users.update(data)  # Purane backup ke liye compatibility
+                        
+                await event.reply(f"✅ **Database Restored!**\n\n🟢 Active: {len(tracked_users)}\n🔴 Blocked: {len(blocked_users)}")
             except Exception as e:
                 await event.reply(f"❌ Failed to restore: {e}")
             finally:
-                os.remove(file_path)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
         else:
             await event.reply("❌ Please reply to a valid `.json` backup file.")
 
+# ==========================================
+# BROADCAST SYSTEM (With Auto Block Detection)
+# ==========================================
+
 @client.on(events.NewMessage(pattern='/broadcast', incoming=True))
 async def broadcast_to_all(event):
+    global tracked_users, blocked_users
     if event.sender_id not in ADMIN_IDS:
         return
         
     if not tracked_users:
-        await event.reply("❌ Database is empty! No users tracked yet. Did you forget to `/restore` your backup?")
+        await event.reply("❌ Active database khali hai! Pehle `/restore` karein.")
         return
         
-    status_msg = await event.reply(f"📢 **Total {len(tracked_users)} Users found.** Broadcast shuru ho raha hai...")
+    status_msg = await event.reply(f"📢 **Total {len(tracked_users)} Active Users par broadcast shuru ho raha hai...**")
     
     success_count = 0
     fail_count = 0
     
-    for user_id in tracked_users:
+    # list() use kiya taaki loop ke beech me set size change hone se crash na ho
+    for user_id in list(tracked_users):
         try:
             if event.is_reply:
                 reply_msg = await event.get_reply_message()
@@ -140,17 +178,30 @@ async def broadcast_to_all(event):
                 else:
                     await status_msg.edit("❌ Galti: Ya toh reply karke `/broadcast` likhein, ya aage text likhein!")
                     return
+            
             success_count += 1
+            # Agar koi pehle blocked me tha par ab active ho gaya, toh blocked se hata do
+            if user_id in blocked_users:
+                blocked_users.remove(user_id)
+                
             await asyncio.sleep(0.5) 
+            
+        except UserIsBlockedError:
+            # 🔥 YAHA PE MAGIC HAI: Agar user ne bot ko block kiya hai
+            fail_count += 1
+            blocked_users.add(user_id)          # Blocked list me daalo
+            if user_id in tracked_users:
+                tracked_users.remove(user_id)   # Active list se hatao
+                
         except Exception:
             fail_count += 1
             
-    await status_msg.edit(f"📢 **Broadcast Report:**\n\n✅ Sahi se gaya: {success_count} bando ko\n❌ Fail hua: {fail_count} bando ka")
+    await status_msg.edit(f"📢 **Broadcast Complete!**\n\n✅ Safal hua: {success_count} bando ko\n❌ Fail hua (Ya Blocked): {fail_count} bando ka\n\n👉 Live stats dekhne ke liye `/users` check karein.")
 
 @client.on(events.NewMessage(pattern='/status', incoming=True))
 async def bot_status(event):
     if event.sender_id in ADMIN_IDS:
-        status_text = f"⚙️ **Bot Status:**\n👥 **Tracked Users:** {len(tracked_users)}\n\n**Sequences Active:**\n"
+        status_text = f"⚙️ **Bot Status:**\n👥 **Tracked Active Users:** {len(tracked_users)}\n🛑 **Blocked Users:** {len(blocked_users)}\n\n**Sequences Active:**\n"
         for step in sorted(saved_messages.keys()):
             status_text += f"🔹 Step {step} -> `{saved_messages[step]['type'].upper()}`\n"
         await event.reply(status_text if saved_messages else "⚙️ Bot sequence khali hai.")
@@ -159,10 +210,12 @@ async def bot_status(event):
 # AUTOMATIC USER JOIN SENDER + TRACKING
 # ==========================================
 async def send_welcome_package(user_id, first_name):
-    global tracked_users
+    global tracked_users, blocked_users
     try:
-        # Save user to active memory
+        # Naya banda aaya matlab active hai, agar pehle blocked me tha toh wahan se hata do
         tracked_users.add(user_id)
+        if user_id in blocked_users:
+            blocked_users.remove(user_id)
         
         # Send Sequence to User
         if saved_messages:
@@ -194,7 +247,7 @@ async def main():
     threading.Thread(target=start_web_server, daemon=True).start()
     logger.info("🤖 Bot Starting...")
     await client.start(bot_token=BOT_TOKEN)
-    logger.info("✅ Bot is online! Error fixed.")
+    logger.info("✅ Bot is online with Active/Block tracking system!")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
