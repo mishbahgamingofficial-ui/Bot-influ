@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.tl.types import UpdateBotChatInviteRequester
 from telethon.errors import UserIsBlockedError, FloodWaitError
-from telethon.sessions import MemorySession  # Session file crash fix
+from telethon.sessions import MemorySession
 
 # Setup Advanced Logging
 logging.basicConfig(
@@ -33,11 +33,17 @@ saved_messages = {}
 tracked_users = set()  # Active Users
 blocked_users = set()  # Blocked Users
 
+# ==========================================
+# 🔥 PYTHON 3.14 FIX: Manually Create Loop Early
+# ==========================================
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
 # MemorySession ensures Render doesn't throw SQLite database lock errors!
-client = TelegramClient(MemorySession(), API_ID, API_HASH)
+client = TelegramClient(MemorySession(), API_ID, API_HASH, loop=loop)
 
 # ==========================================
-# ASYNC WEB SERVER (Keeps Render Alive without Threading issues)
+# ASYNC WEB SERVER (Keeps Render Alive)
 # ==========================================
 async def web_handler(request):
     return web.Response(text="🟢 Pro Bot Tracking System is Live & Running!")
@@ -260,8 +266,8 @@ async def main():
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
     try:
+        # Use the loop we safely created at the very top
         loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("Bot manually stopped.")
