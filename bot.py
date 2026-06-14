@@ -1,12 +1,12 @@
 import os
 import asyncio
 import logging
-import threading
+import threadi
 import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from dotenv import load_dotenv
+from httpserver import BaseHTTPRequestHandler, HTTPServer
+from dotenv import load_dote
 from telethon import TelegramClient, events
-from telethon.tl.types import UpdateBotChatInviteRequester
+from telet.tl.types import UpdateBotChatInviteRequester
 from telethon.errors import UserIsBlockedError  # Blocked users pakadne ke liye
 
 # Setup Advanced Logging
