@@ -13,7 +13,6 @@ from telethon.sessions import MemorySession
 # SETUP & CONFIGURATION
 # ==========================================
 
-# Setup Advanced Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
     level=logging.INFO
@@ -22,26 +21,22 @@ logger = logging.getLogger("ProTelegramBot")
 
 load_dotenv()
 
-# Fetch Environment Variables safely
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", 10000))
 
-# Multi-Admin IDs
 raw_admins = os.environ.get("ADMIN_IDS", "0")
 ADMIN_IDS = [int(admin.strip()) for admin in raw_admins.split(",") if admin.strip().isdigit()]
 
-# In-Memory Database
 saved_messages = {}
-tracked_users = set()  # Active Users
-blocked_users = set()  # Blocked Users
+# 🔥 BIG CHANGE: tracked_users ab list/set nahi, ek Dictionary (Map) hai!
+# Format: {user_id: access_hash}
+tracked_users = {}  
+blocked_users = set()  
 
-# 🔥 PYTHON 3.14 FIX: Manually Create Loop Early for Render
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
-
-# MemorySession ensures Render doesn't throw SQLite database lock errors!
 client = TelegramClient(MemorySession(), API_ID, API_HASH, loop=loop)
 
 # ==========================================
@@ -68,8 +63,11 @@ async def start_web_server():
 
 @client.on(events.NewMessage(pattern='/start', incoming=True))
 async def start_handler(event):
+    # Capture admin's own access_hash just in case
+    user = await event.get_sender()
+    tracked_users[user.id] = getattr(user, 'access_hash', 0)
+
     if event.sender_id in ADMIN_IDS:
-        # Admin Keyboard Design
         admin_keyboard = [
             [Button.text("📊 Users Stats"), Button.text("⚙️ System Status")],
             [Button.text("📢 Broadcast"), Button.text("🔢 Set Sequence")],
@@ -80,7 +78,6 @@ async def start_handler(event):
             buttons=admin_keyboard
         )
     else:
-        # Normal User (No Keyboard)
         await event.reply(
             "👋 **Hello! Welcome to the bot.**\nMain ek automated system hu.", 
             buttons=Button.clear()
@@ -90,7 +87,6 @@ async def start_handler(event):
 # ADMIN COMMANDS & BUTTON HANDLERS
 # ==========================================
 
-# STATUS BUTTON & COMMAND
 @client.on(events.NewMessage(pattern=r'^(/status|⚙️ System Status)$', incoming=True))
 async def bot_status(event):
     if event.sender_id in ADMIN_IDS:
@@ -99,7 +95,6 @@ async def bot_status(event):
             status_text += f"🔹 Step {step} ➜ `{saved_messages[step]['type'].upper()}`\n"
         await event.reply(status_text if saved_messages else "⚙️ System Online. No sequences set.")
 
-# USERS BUTTON & COMMAND
 @client.on(events.NewMessage(pattern=r'^(/users|📊 Users Stats)$', incoming=True))
 async def show_users_stats(event):
     if event.sender_id in ADMIN_IDS:
@@ -111,17 +106,15 @@ async def show_users_stats(event):
         )
         await event.reply(stats_msg)
 
-# INSTRUCTIONS FOR COMPLEX BUTTONS
 @client.on(events.NewMessage(pattern=r'^(📢 Broadcast|🔢 Set Sequence|🔄 Restore)$', incoming=True))
 async def button_instructions(event):
     if event.sender_id not in ADMIN_IDS:
         return
-    
     text = event.text
     if text == "📢 Broadcast":
-        await event.reply("📢 **Broadcast Kaise Karein?**\n\nYe button click karne se direct message nahi jata. Aapko type karna hoga:\n👉 `/broadcast Hello everyone!`\n\nYa fir kisi image/message par reply karke `/broadcast` likhein.")
+        await event.reply("📢 **Broadcast Kaise Karein?**\n\n👉 `/broadcast Hello everyone!`\n\nYa fir kisi image/message par reply karke `/broadcast` likhein.")
     elif text == "🔢 Set Sequence":
-        await event.reply("🔢 **Sequence Kaise Set Karein?**\n\nType karein: `/setmsg1 <aapka text>`\nYa kisi message/file par reply karke `/setmsg1` likhein.\n\n*Number change karke step 2, 3 bhi set kar sakte hain.*")
+        await event.reply("🔢 **Sequence Kaise Set Karein?**\n\nType karein: `/setmsg1 <aapka text>`\nYa kisi message/file par reply karke `/setmsg1` likhein.")
     elif text == "🔄 Restore":
         await event.reply("🔄 **Restore Kaise Karein?**\n\nPehle apni `users_backup.json` file yaha bhejein, phir us file par reply karke `/restore` likhein.")
 
@@ -133,7 +126,6 @@ async def button_instructions(event):
 async def set_message_step(event):
     if event.sender_id not in ADMIN_IDS:
         return
-    
     step_num = int(event.pattern_match.group(1))
     extra_text = event.pattern_match.group(2)
     
@@ -148,11 +140,9 @@ async def set_message_step(event):
         if step_num in saved_messages:
             del saved_messages[step_num]
             await event.reply(f"🗑 **Message Sequence `{step_num}` Removed.**")
-        else:
-            await event.reply("⚠️ Pura command likhein. Ya toh reply karein, ya aage text likhein.")
 
 # ==========================================
-# BACKUP & RESTORE SYSTEM
+# BACKUP & RESTORE SYSTEM (UPDATED FOR HASH)
 # ==========================================
 
 @client.on(events.NewMessage(pattern=r'^(/backup|📁 Backup)$', incoming=True))
@@ -161,7 +151,7 @@ async def backup_data(event):
         return
     
     backup_dict = {
-        "tracked": list(tracked_users),
+        "tracked": tracked_users,  # Ab dictionary save hogi
         "blocked": list(blocked_users)
     }
     
@@ -171,7 +161,7 @@ async def backup_data(event):
     await client.send_file(
         event.chat_id, 
         "users_backup.json", 
-        caption="📁 **Database Backup Completed.**\nSafe rakhna is file ko!"
+        caption="📁 **Database Backup Completed.**\nIs naye backup me Access Hashes bhi saved hain!"
     )
     os.remove("users_backup.json")
 
@@ -189,14 +179,23 @@ async def restore_data(event):
                     data = json.load(f)
                     
                     if isinstance(data, dict):
-                        tracked_users.update(data.get("tracked", []))
+                        # Restore logic changed to handle dictionaries
+                        tracked_data = data.get("tracked", {})
+                        if isinstance(tracked_data, dict):
+                            # Naya format: {id: hash}
+                            for uid, hsh in tracked_data.items():
+                                tracked_users[int(uid)] = int(hsh)
+                        elif isinstance(tracked_data, list):
+                            # Purana format fallback (might still fail broadcast, but won't crash code)
+                            for uid in tracked_data:
+                                if uid not in tracked_users:
+                                    tracked_users[int(uid)] = 0
+                                    
                         blocked_users.update(data.get("blocked", []))
-                    elif isinstance(data, list):
-                        tracked_users.update(data)
                         
-                await event.reply(f"✅ **Database Restored Successfully!**\n\n🟢 Active: `{len(tracked_users)}`\n🔴 Blocked: `{len(blocked_users)}`")
+                await event.reply(f"✅ **Database Restored!**\n\n🟢 Active: `{len(tracked_users)}`\n🔴 Blocked: `{len(blocked_users)}`")
             except Exception as e:
-                await event.reply(f"❌ Restore Failed. Corrupt file? Error: {e}")
+                await event.reply(f"❌ Restore Failed: {e}")
             finally:
                 if os.path.exists(file_path):
                     os.remove(file_path)
@@ -204,7 +203,7 @@ async def restore_data(event):
             await event.reply("❌ Please reply to a valid `.json` backup file.")
 
 # ==========================================
-# ANTI-BAN BROADCAST SYSTEM (WITH CACHE BYPASS)
+# ANTI-BAN BROADCAST SYSTEM (REAL FIX)
 # ==========================================
 
 @client.on(events.NewMessage(pattern=r'^/broadcast', incoming=True))
@@ -221,13 +220,14 @@ async def broadcast_to_all(event):
     success_count = 0
     fail_count = 0
     
-    current_users = list(tracked_users)
+    # Iterate through dict: user_id and access_hash
+    current_users = list(tracked_users.items())
     
-    for user_id in current_users:
+    for uid, access_hash in current_users:
+        uid = int(uid)
         try:
-            # 🔥 THE HACK: Bypass Entity Cache Error for offline users
-            uid = int(user_id)
-            peer = InputPeerUser(uid, 0) # 0 access_hash works for bots!
+            # 🔥 THE REAL FIX: Proper Peer construction with real access_hash
+            peer = InputPeerUser(uid, int(access_hash))
 
             if event.is_reply:
                 reply_msg = await event.get_reply_message()
@@ -250,39 +250,46 @@ async def broadcast_to_all(event):
             logger.warning(f"FloodWaitError: Sleeping for {e.seconds} seconds.")
             await asyncio.sleep(e.seconds)
             
-        except UserIsBlockedError:
+        except (UserIsBlockedError, ValueError):
+            # ValueError catch karega agar access_hash 0 wali file se purana data use ho raha ho
             fail_count += 1
             blocked_users.add(uid)
             if uid in tracked_users:
-                tracked_users.remove(uid)
+                del tracked_users[uid]
                 
         except Exception as e:
             fail_count += 1
-            logger.error(f"Broadcast error for ID {user_id}: {e}")
+            logger.error(f"Broadcast error for ID {uid}: {e}")
             
     await status_msg.edit(f"📢 **Broadcast Finished!**\n\n✅ Delivered: `{success_count}`\n🔴 Blocked/Failed: `{fail_count}`")
 
 # ==========================================
 # AUTOMATIC WELCOME & TRACKING
 # ==========================================
-async def send_welcome_package(user_id, first_name):
+async def send_welcome_package(user):
     try:
-        tracked_users.add(user_id)
-        if user_id in blocked_users:
-            blocked_users.remove(user_id)
+        uid = user.id
+        # Safely get access_hash
+        access_hash = getattr(user, 'access_hash', 0)
+        
+        # Save into Dictionary
+        tracked_users[uid] = access_hash
+        
+        if uid in blocked_users:
+            blocked_users.remove(uid)
         
         if saved_messages:
             for step in sorted(saved_messages.keys()):
                 item = saved_messages[step]
                 if item['type'] == 'forward':
-                    await client.forward_messages(user_id, item['msg_id'], item['from_chat'])
+                    await client.forward_messages(uid, item['msg_id'], item['from_chat'])
                 elif item['type'] == 'text':
-                    await client.send_message(user_id, item['text'])
+                    await client.send_message(uid, item['text'])
                 await asyncio.sleep(0.5)
             
-        logger.info(f"✅ Sequence delivered to: {first_name} ({user_id})")
+        logger.info(f"✅ Sequence delivered & Hash Tracked for ID: {uid}")
     except UserIsBlockedError:
-        logger.warning(f"User {user_id} blocked the bot instantly.")
+        logger.warning(f"User {uid} blocked the bot instantly.")
     except Exception as e:
         logger.error(f"Failed welcome sequence: {e}")
 
@@ -290,12 +297,17 @@ async def send_welcome_package(user_id, first_name):
 async def handle_chat_action(event):
     if event.user_joined or event.user_added:
         user = await event.get_user()
-        await send_welcome_package(user.id, user.first_name)
+        await send_welcome_package(user)
 
 @client.on(events.Raw)
 async def raw_join_request_handler(event):
     if isinstance(event, UpdateBotChatInviteRequester):
-        await send_welcome_package(event.user_id, "Join Requester")
+        try:
+            # Fetch complete user info to get access_hash
+            user = await client.get_entity(event.user_id)
+            await send_welcome_package(user)
+        except Exception as e:
+            logger.error(f"Failed to fetch join requester entity: {e}")
 
 # ==========================================
 # MAIN EXECUTION
@@ -303,10 +315,8 @@ async def raw_join_request_handler(event):
 async def main():
     await start_web_server()
     logger.info("🤖 Starting Telegram Bot...")
-    
     await client.start(bot_token=BOT_TOKEN)
     logger.info("✅ Bot Online and running cleanly!")
-    
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
@@ -316,4 +326,4 @@ if __name__ == "__main__":
         logger.info("Bot manually stopped.")
     except Exception as e:
         logger.error(f"Critical Runtime Error: {e}")
-        
+                             
