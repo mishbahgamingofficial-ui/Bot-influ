@@ -4,10 +4,14 @@ import logging
 import json
 from aiohttp import web
 from dotenv import load_dotenv
-from telethon import TelegramClient, events
-from telethon.tl.types import UpdateBotChatInviteRequester
+from telethon import TelegramClient, events, Button
+from telethon.tl.types import UpdateBotChatInviteRequester, InputPeerUser
 from telethon.errors import UserIsBlockedError, FloodWaitError
 from telethon.sessions import MemorySession
+
+# ==========================================
+# SETUP & CONFIGURATION
+# ==========================================
 
 # Setup Advanced Logging
 logging.basicConfig(
@@ -33,9 +37,7 @@ saved_messages = {}
 tracked_users = set()  # Active Users
 blocked_users = set()  # Blocked Users
 
-# ==========================================
-# 🔥 PYTHON 3.14 FIX: Manually Create Loop Early
-# ==========================================
+# 🔥 PYTHON 3.14 FIX: Manually Create Loop Early for Render
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
@@ -61,7 +63,70 @@ async def start_web_server():
         logger.error(f"❌ Web server failed to start: {e}")
 
 # ==========================================
-# ADMIN COMMANDS PANEL
+# 💎 EXCLUSIVE ADMIN PANEL KEYBOARD 
+# ==========================================
+
+@client.on(events.NewMessage(pattern='/start', incoming=True))
+async def start_handler(event):
+    if event.sender_id in ADMIN_IDS:
+        # Admin Keyboard Design
+        admin_keyboard = [
+            [Button.text("📊 Users Stats"), Button.text("⚙️ System Status")],
+            [Button.text("📢 Broadcast"), Button.text("🔢 Set Sequence")],
+            [Button.text("📁 Backup"), Button.text("🔄 Restore")]
+        ]
+        await event.reply(
+            "👨‍💻 **Welcome Admin!**\n\nAapka Control Panel tayyar hai. Niche diye gaye buttons ka use karein:", 
+            buttons=admin_keyboard
+        )
+    else:
+        # Normal User (No Keyboard)
+        await event.reply(
+            "👋 **Hello! Welcome to the bot.**\nMain ek automated system hu.", 
+            buttons=Button.clear()
+        )
+
+# ==========================================
+# ADMIN COMMANDS & BUTTON HANDLERS
+# ==========================================
+
+# STATUS BUTTON & COMMAND
+@client.on(events.NewMessage(pattern=r'^(/status|⚙️ System Status)$', incoming=True))
+async def bot_status(event):
+    if event.sender_id in ADMIN_IDS:
+        status_text = f"⚙️ **System Status:**\n👥 **Active Users:** `{len(tracked_users)}`\n🛑 **Blocked Users:** `{len(blocked_users)}`\n\n**Active Sequences:**\n"
+        for step in sorted(saved_messages.keys()):
+            status_text += f"🔹 Step {step} ➜ `{saved_messages[step]['type'].upper()}`\n"
+        await event.reply(status_text if saved_messages else "⚙️ System Online. No sequences set.")
+
+# USERS BUTTON & COMMAND
+@client.on(events.NewMessage(pattern=r'^(/users|📊 Users Stats)$', incoming=True))
+async def show_users_stats(event):
+    if event.sender_id in ADMIN_IDS:
+        stats_msg = (
+            "📊 **Pro Bot User Statistics:**\n\n"
+            f"🟢 **Active Users:** `{len(tracked_users)}`\n"
+            f"🔴 **Blocked Users:** `{len(blocked_users)}`\n\n"
+            f"💡 *Pro Tip:* Use 📁 Backup frequently to save these users."
+        )
+        await event.reply(stats_msg)
+
+# INSTRUCTIONS FOR COMPLEX BUTTONS
+@client.on(events.NewMessage(pattern=r'^(📢 Broadcast|🔢 Set Sequence|🔄 Restore)$', incoming=True))
+async def button_instructions(event):
+    if event.sender_id not in ADMIN_IDS:
+        return
+    
+    text = event.text
+    if text == "📢 Broadcast":
+        await event.reply("📢 **Broadcast Kaise Karein?**\n\nYe button click karne se direct message nahi jata. Aapko type karna hoga:\n👉 `/broadcast Hello everyone!`\n\nYa fir kisi image/message par reply karke `/broadcast` likhein.")
+    elif text == "🔢 Set Sequence":
+        await event.reply("🔢 **Sequence Kaise Set Karein?**\n\nType karein: `/setmsg1 <aapka text>`\nYa kisi message/file par reply karke `/setmsg1` likhein.\n\n*Number change karke step 2, 3 bhi set kar sakte hain.*")
+    elif text == "🔄 Restore":
+        await event.reply("🔄 **Restore Kaise Karein?**\n\nPehle apni `users_backup.json` file yaha bhejein, phir us file par reply karke `/restore` likhein.")
+
+# ==========================================
+# SET MESSAGE SEQUENCE LOGIC
 # ==========================================
 
 @client.on(events.NewMessage(pattern=r'^/setmsg(\d+)(?:\s+(.+))?', incoming=True))
@@ -86,24 +151,11 @@ async def set_message_step(event):
         else:
             await event.reply("⚠️ Pura command likhein. Ya toh reply karein, ya aage text likhein.")
 
-@client.on(events.NewMessage(pattern='/users', incoming=True))
-async def show_users_stats(event):
-    if event.sender_id not in ADMIN_IDS:
-        return
-    
-    stats_msg = (
-        "📊 **Pro Bot User Statistics:**\n\n"
-        f"🟢 **Active Users:** `{len(tracked_users)}`\n"
-        f"🔴 **Blocked Users:** `{len(blocked_users)}`\n\n"
-        f"💡 *Pro Tip:* Use `/backup` frequently to save these users."
-    )
-    await event.reply(stats_msg)
-
 # ==========================================
 # BACKUP & RESTORE SYSTEM
 # ==========================================
 
-@client.on(events.NewMessage(pattern='/backup', incoming=True))
+@client.on(events.NewMessage(pattern=r'^(/backup|📁 Backup)$', incoming=True))
 async def backup_data(event):
     if event.sender_id not in ADMIN_IDS:
         return
@@ -149,13 +201,13 @@ async def restore_data(event):
                 if os.path.exists(file_path):
                     os.remove(file_path)
         else:
-            await event.reply("❌ Reply to a valid `.json` backup file bro.")
+            await event.reply("❌ Please reply to a valid `.json` backup file.")
 
 # ==========================================
-# ANTI-BAN BROADCAST SYSTEM
+# ANTI-BAN BROADCAST SYSTEM (WITH CACHE BYPASS)
 # ==========================================
 
-@client.on(events.NewMessage(pattern='/broadcast', incoming=True))
+@client.on(events.NewMessage(pattern=r'^/broadcast', incoming=True))
 async def broadcast_to_all(event):
     if event.sender_id not in ADMIN_IDS:
         return
@@ -169,52 +221,46 @@ async def broadcast_to_all(event):
     success_count = 0
     fail_count = 0
     
-    # Snapshot of tracked users to safely modify sets during loop
     current_users = list(tracked_users)
     
     for user_id in current_users:
         try:
+            # 🔥 THE HACK: Bypass Entity Cache Error for offline users
+            uid = int(user_id)
+            peer = InputPeerUser(uid, 0) # 0 access_hash works for bots!
+
             if event.is_reply:
                 reply_msg = await event.get_reply_message()
-                await client.forward_messages(user_id, reply_msg.id, event.chat_id)
+                await client.forward_messages(peer, reply_msg.id, event.chat_id)
             else:
                 broadcast_text = event.text.replace('/broadcast', '').strip()
                 if broadcast_text:
-                    await client.send_message(user_id, broadcast_text)
+                    await client.send_message(peer, broadcast_text)
                 else:
                     await status_msg.edit("❌ You must provide text or reply to a message!")
                     return
             
             success_count += 1
-            if user_id in blocked_users:
-                blocked_users.remove(user_id)
+            if uid in blocked_users:
+                blocked_users.remove(uid)
                 
-            await asyncio.sleep(0.3) # Keep limits safe
+            await asyncio.sleep(0.3)
             
         except FloodWaitError as e:
-            # 🛑 ANTI-BAN: Agar Telegram limit lagata hai, toh bot automatically wait karega
             logger.warning(f"FloodWaitError: Sleeping for {e.seconds} seconds.")
             await asyncio.sleep(e.seconds)
             
         except UserIsBlockedError:
             fail_count += 1
-            blocked_users.add(user_id)
-            if user_id in tracked_users:
-                tracked_users.remove(user_id)
+            blocked_users.add(uid)
+            if uid in tracked_users:
+                tracked_users.remove(uid)
                 
         except Exception as e:
             fail_count += 1
-            logger.error(f"Broadcast error for {user_id}: {e}")
+            logger.error(f"Broadcast error for ID {user_id}: {e}")
             
     await status_msg.edit(f"📢 **Broadcast Finished!**\n\n✅ Delivered: `{success_count}`\n🔴 Blocked/Failed: `{fail_count}`")
-
-@client.on(events.NewMessage(pattern='/status', incoming=True))
-async def bot_status(event):
-    if event.sender_id in ADMIN_IDS:
-        status_text = f"⚙️ **System Status:**\n👥 **Active:** `{len(tracked_users)}`\n🛑 **Blocked:** `{len(blocked_users)}`\n\n**Active Sequences:**\n"
-        for step in sorted(saved_messages.keys()):
-            status_text += f"🔹 Step {step} ➜ `{saved_messages[step]['type'].upper()}`\n"
-        await event.reply(status_text if saved_messages else "⚙️ System Online. No sequences set.")
 
 # ==========================================
 # AUTOMATIC WELCOME & TRACKING
@@ -255,21 +301,19 @@ async def raw_join_request_handler(event):
 # MAIN EXECUTION
 # ==========================================
 async def main():
-    # Start web server alongside the bot asynchronously
     await start_web_server()
     logger.info("🤖 Starting Telegram Bot...")
     
     await client.start(bot_token=BOT_TOKEN)
     logger.info("✅ Bot Online and running cleanly!")
     
-    # Run the client until it's disconnected
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
     try:
-        # Use the loop we safely created at the very top
         loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("Bot manually stopped.")
     except Exception as e:
         logger.error(f"Critical Runtime Error: {e}")
+        
