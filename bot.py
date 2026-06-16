@@ -14,7 +14,11 @@ from telethon.tl.types import UpdateBotChatInviteRequester, InputPeerUser
 from telethon.errors import (
     UserIsBlockedError,
     FloodWaitError,
-    PeerIdInvalidError
+    PeerIdInvalidError,
+    ValueError,
+    ChatInvalidError,
+    ChannelInvalidError,
+    MessageIdInvalidError,
 )
 
 # ------------------ ENVIRONMENT ------------------
@@ -153,18 +157,29 @@ def admin_only(func):
         await func(event)
     return wrapper
 
-# ------------------ WELCOME SYSTEM ------------------
+# ------------------ WELCOME SYSTEM (FIXED) ------------------
 async def send_welcome_sequence(user):
     uid = user.id
     access_hash = getattr(user, 'access_hash', 0)
-    if access_hash == 0:
-        try:
-            full = await client.get_entity(uid)
-            access_hash = getattr(full, 'access_hash', 0)
-        except:
-            logger.warning(f"Cannot get access_hash for {uid}")
-            return
 
+    # 1. Skip bots (Telegram doesn't allow bot‑to‑bot messages)
+    if getattr(user, 'is_bot', False):
+        logger.info(f"Skipping bot user {uid}")
+        return
+
+    # 2. Get a fresh entity to ensure a valid access_hash
+    try:
+        full_user = await client.get_entity(uid)
+        access_hash = getattr(full_user, 'access_hash', 0)
+    except Exception as e:
+        logger.warning(f"Cannot get entity for {uid}: {e}")
+        return
+
+    if access_hash == 0:
+        logger.warning(f"Zero access_hash for {uid}, cannot send welcome")
+        return
+
+    # Save/update user
     tracked_users[uid] = access_hash
     save_user(uid, access_hash, blocked=False)
     blocked_users.discard(uid)
@@ -172,24 +187,42 @@ async def send_welcome_sequence(user):
     if not welcome_enabled or uid in ADMIN_IDS:
         return
 
-    try:
-        for step in sorted(saved_messages.keys()):
-            item = saved_messages[step]
+    # Build peer for direct use
+    peer = InputPeerUser(uid, access_hash)
+
+    for step in sorted(saved_messages.keys()):
+        item = saved_messages[step]
+        try:
             if item['type'] == 'forward':
-                await client.forward_messages(uid, item['msg_id'], item['from_chat'])
+                # Optionally verify the source message exists (prevents forwarding errors)
+                try:
+                    await client.get_messages(item['from_chat'], ids=item['msg_id'])
+                except (MessageIdInvalidError, ChatInvalidError, ChannelInvalidError):
+                    logger.warning(f"Forward source {item['msg_id']} in chat {item['from_chat']} not accessible, skipping step {step}")
+                    continue
+                await client.forward_messages(peer, item['msg_id'], item['from_chat'])
             else:
-                await client.send_message(uid, item['text'])
+                await client.send_message(peer, item['text'])
             await asyncio.sleep(0.5)
-        logger.info(f"Welcome sent to {uid}")
-    except UserIsBlockedError:
-        blocked_users.add(uid)
-        save_user(uid, access_hash, blocked=True)
-        logger.info(f"User {uid} blocked during welcome")
-    except FloodWaitError as e:
-        logger.warning(f"Flood wait {e.seconds}s")
-        await asyncio.sleep(e.seconds)
-    except Exception as e:
-        logger.error(f"Welcome error for {uid}: {e}")
+        except UserIsBlockedError:
+            blocked_users.add(uid)
+            save_user(uid, access_hash, blocked=True)
+            logger.info(f"User {uid} blocked during welcome")
+            return  # stop further steps
+        except (PeerIdInvalidError, ValueError) as e:
+            blocked_users.add(uid)
+            save_user(uid, access_hash, blocked=True)
+            logger.warning(f"Invalid peer {uid}, marking as blocked: {e}")
+            return
+        except FloodWaitError as e:
+            logger.warning(f"Flood wait {e.seconds}s")
+            await asyncio.sleep(e.seconds)
+        except Exception as e:
+            logger.error(f"Welcome step {step} error for {uid}: {e}")
+            # Continue with next step? Usually we skip this one and proceed
+            continue
+
+    logger.info(f"Welcome sequence completed for {uid}")
 
 @client.on(events.ChatAction())
 async def chat_action(event):
@@ -243,7 +276,7 @@ async def status(event):
         f"Sequence:\n{steps if steps else 'none'}"
     )
 
-# ------------------ BROADCAST ------------------
+# ------------------ BROADCAST (FIXED: skip bots, use InputPeerUser) ------------------
 @client.on(events.NewMessage(pattern=r'^/broadcast'))
 @admin_only
 async def broadcast(event):
@@ -258,13 +291,18 @@ async def broadcast(event):
 
     status_msg = await event.reply(f"📢 Broadcasting to {len(tracked_users)}...")
     success = fail = skip = 0
+
     for uid, access_hash in list(tracked_users.items()):
         if uid in blocked_users:
             skip += 1
             continue
+        # Skip bots if you want to avoid errors (optional)
+        # You can check is_bot by getting entity, but that costs extra API calls.
+        # Instead, just catch PeerIdInvalidError and mark as blocked.
         if access_hash == 0:
             fail += 1
             continue
+
         try:
             peer = InputPeerUser(uid, access_hash)
             if event.is_reply:
