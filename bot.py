@@ -15,7 +15,7 @@ from telethon.errors import (
     UserIsBlockedError,
     FloodWaitError,
     PeerIdInvalidError,
-    ValueError,
+    # ValueError is a built-in, do NOT import it from telethon.errors
     ChatInvalidError,
     ChannelInvalidError,
     MessageIdInvalidError,
@@ -209,7 +209,7 @@ async def send_welcome_sequence(user):
             save_user(uid, access_hash, blocked=True)
             logger.info(f"User {uid} blocked during welcome")
             return  # stop further steps
-        except (PeerIdInvalidError, ValueError) as e:
+        except (PeerIdInvalidError, ValueError) as e:   # ValueError is built-in, OK
             blocked_users.add(uid)
             save_user(uid, access_hash, blocked=True)
             logger.warning(f"Invalid peer {uid}, marking as blocked: {e}")
