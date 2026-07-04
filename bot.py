@@ -206,8 +206,8 @@ async def remove_welcome_cooldown(uid):
 
 async def send_user_menu(entity):
     btns = [
-        [Button.text("I want Hack", resize=True)],
-        [Button.text("I want Prediction", resize=True)],
+        [Button.text("I Want Number HACK", resize=True)],
+        [Button.text("How To Start COLOUR TRADING", resize=True)],
     ]
     try:
         await client.send_message(
