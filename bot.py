@@ -56,7 +56,7 @@ DB_PATH = Path("bot_data.db")
 tracked_users: dict[int, int] = {}      
 blocked_users: set[int] = set()
 saved_messages: dict[int, dict] = {}    
-button_forwards: dict[str, list] = {}   # Upgraded to hold a LIST of messages
+button_forwards: dict[str, list] = {}   
 welcome_enabled = True
 recently_welcomed: set[int] = set()
 
@@ -80,7 +80,6 @@ def init_db():
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
-            /* Upgraded table structure to allow multiple messages per button */
             CREATE TABLE IF NOT EXISTS button_msgs (
                 btn_key TEXT,
                 msg_id INTEGER NOT NULL,
@@ -313,19 +312,17 @@ async def start(event):
             await send_welcome_sequence(user)
             await send_user_menu(user)
 
-# ------------------ KEYBOARD BUTTON HANDLER ------------------
-@client.on(events.NewMessage(pattern="(?i)^I want Hack$"))
+# ------------------ FOOLPROOF BUTTON HANDLERS ------------------
+# Yeh Lambda function 100% fail-proof hai, case or spaces ka issue nahi aayega!
+@client.on(events.NewMessage(func=lambda e: e.text and "number hack" in e.text.lower()))
 async def hack_button_handler(event):
     await send_button_forward(event, "hack")
 
-@client.on(events.NewMessage(pattern="(?i)^I want Prediction$"))
+@client.on(events.NewMessage(func=lambda e: e.text and "colour trading" in e.text.lower()))
 async def prediction_button_handler(event):
     await send_button_forward(event, "prediction")
 
 async def send_button_forward(event, key):
-    if event.sender_id in ADMIN_IDS:
-        return
-
     uid = event.sender_id
     config_list = button_forwards.get(key)
     
@@ -333,25 +330,45 @@ async def send_button_forward(event, key):
         await event.reply("⚠️ This option is not configured yet. Please contact admin.")
         return
 
+    # Visual loading status added so you know bot is responding!
+    status_msg = await event.reply("⏳ Sending requested information...")
+
     try:
-        user_peer = await client.get_input_entity(uid)
+        sent_count = 0
         
-        # Loop through all messages saved for this button
         for config in config_list:
-            msg = await client.get_messages(config["from_chat"], ids=config["msg_id"])
-            if msg:
-                await client.forward_messages(user_peer, msg.id, config["from_chat"])
-            await asyncio.sleep(0.3) # Small delay to prevent API flood limits
+            admin_id = config["from_chat"]
+            # Fetch hash directly from memory/DB to bypass Render server resets!
+            admin_hash = tracked_users.get(admin_id, 0)
+            
+            # Smart peer reconstruction
+            if admin_id > 0 and admin_hash:
+                from_peer = InputPeerUser(admin_id, admin_hash)
+            else:
+                from_peer = admin_id 
+
+            try:
+                await client.forward_messages(uid, config["msg_id"], from_peer)
+                sent_count += 1
+            except Exception as inner_e:
+                logger.warning(f"Could not forward msg {config['msg_id']} for {uid}: {inner_e}")
+                
+            await asyncio.sleep(0.3) 
+            
+        if sent_count == 0:
+            await status_msg.edit("❌ The configured messages are unavailable or deleted. Admin needs to reset them.")
+        else:
+            await status_msg.delete() # Successful, hide the loading message
             
     except UserIsBlockedError:
-        await event.reply("❌ You have blocked the bot. Please unblock and try again.")
+        await status_msg.edit("❌ You have blocked the bot. Please unblock and try again.")
     except PeerIdInvalidError:
-        await event.reply("❌ Could not send you the message. Please start the bot again.")
+        await status_msg.edit("❌ Could not send you the message. Please start the bot again.")
     except FloodWaitError as e:
-        await event.reply(f"⏳ Too many requests, please wait {e.seconds} seconds.")
+        await status_msg.edit(f"⏳ Too many requests, please wait {e.seconds} seconds.")
     except Exception as e:
         logger.error(f"Button {key} error for {uid}: {e}")
-        await event.reply("❌ Something went wrong. Please try again later.")
+        await status_msg.edit("❌ Something went wrong. Please try again later.")
 
 # ------------------ STATS / STATUS ------------------
 @client.on(events.NewMessage(pattern=r"^(/stats|📊 Stats)$"))
@@ -589,7 +606,6 @@ async def restore(event):
                 conn.execute("INSERT OR REPLACE INTO messages (step, msg_type, text, msg_id, from_chat) VALUES (?,?,?,?,?)",
                              (step, d.get("type"), d.get("text"), d.get("msg_id"), d.get("from_chat")))
             for key, cfg_list in button_forwards.items():
-                # Handle old backup dict format or new list format seamlessly
                 if isinstance(cfg_list, dict): 
                     cfg_list = [cfg_list]
                     button_forwards[key] = cfg_list
