@@ -53,10 +53,10 @@ ADMIN_IDS = parse_admin_ids(os.environ.get("ADMIN_IDS", "0"))
 # ------------------ DATABASE ------------------
 DB_PATH = Path("bot_data.db")
 
-tracked_users: dict[int, int] = {}      # user_id -> access_hash
+tracked_users: dict[int, int] = {}      
 blocked_users: set[int] = set()
-saved_messages: dict[int, dict] = {}    # step -> {"type","text"/"msg_id","from_chat"}
-button_forwards: dict[str, dict] = {}   # "hack"/"prediction" -> {"msg_id", "from_chat"}
+saved_messages: dict[int, dict] = {}    
+button_forwards: dict[str, list] = {}   # Upgraded to hold a LIST of messages
 welcome_enabled = True
 recently_welcomed: set[int] = set()
 
@@ -80,8 +80,9 @@ def init_db():
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
-            CREATE TABLE IF NOT EXISTS button_configs (
-                btn_key TEXT PRIMARY KEY,
+            /* Upgraded table structure to allow multiple messages per button */
+            CREATE TABLE IF NOT EXISTS button_msgs (
+                btn_key TEXT,
                 msg_id INTEGER NOT NULL,
                 from_chat INTEGER NOT NULL
             );
@@ -104,9 +105,12 @@ def load_from_db():
                 "type": mtype, "text": text, "msg_id": mid, "from_chat": fchat
             }
             
-        cur.execute("SELECT btn_key, msg_id, from_chat FROM button_configs")
+        cur.execute("SELECT btn_key, msg_id, from_chat FROM button_msgs")
+        button_forwards.clear()
         for key, mid, fchat in cur.fetchall():
-            button_forwards[key] = {"msg_id": mid, "from_chat": fchat}
+            if key not in button_forwards:
+                button_forwards[key] = []
+            button_forwards[key].append({"msg_id": mid, "from_chat": fchat})
             
         cur.execute("SELECT value FROM settings WHERE key='welcome_enabled'")
         row = cur.fetchone()
@@ -114,7 +118,7 @@ def load_from_db():
             welcome_enabled = row[0] == "1"
             
     logger.info(f"Loaded {len(tracked_users)} users, {len(blocked_users)} blocked, "
-                f"{len(saved_messages)} messages, {len(button_forwards)} button configs")
+                f"{len(saved_messages)} messages, {len(button_forwards)} buttons configured")
 
 def save_user(uid: int, access_hash: int, blocked: bool = False):
     with sqlite3.connect(str(DB_PATH)) as conn:
@@ -130,16 +134,16 @@ def save_message_step(step: int, data: dict):
             (step, data.get("type"), data.get("text"), data.get("msg_id"), data.get("from_chat")),
         )
 
-def save_button_config(key: str, msg_id: int, from_chat: int):
+def add_button_config(key: str, msg_id: int, from_chat: int):
     with sqlite3.connect(str(DB_PATH)) as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO button_configs (btn_key, msg_id, from_chat) VALUES (?,?,?)",
+            "INSERT INTO button_msgs (btn_key, msg_id, from_chat) VALUES (?,?,?)",
             (key, msg_id, from_chat),
         )
 
 def delete_button_config(key: str):
     with sqlite3.connect(str(DB_PATH)) as conn:
-        conn.execute("DELETE FROM button_configs WHERE btn_key=?", (key,))
+        conn.execute("DELETE FROM button_msgs WHERE btn_key=?", (key,))
 
 def set_setting(key: str, value: str):
     with sqlite3.connect(str(DB_PATH)) as conn:
@@ -202,8 +206,8 @@ async def remove_welcome_cooldown(uid):
 
 async def send_user_menu(entity):
     btns = [
-        [Button.text("How To Start COLOUR TRADING", resize=True)],
-        [Button.text("I Want Number HACK", resize=True)],
+        [Button.text("I want Hack", resize=True)],
+        [Button.text("I want Prediction", resize=True)],
     ]
     try:
         await client.send_message(
@@ -232,14 +236,12 @@ async def send_welcome_sequence(user):
         logger.warning(f"Cannot get entity for {uid}: {e}")
         return
 
-    # Check if this user is entirely new to the bot
     is_new_user = uid not in tracked_users
 
     tracked_users[uid] = access_hash
     save_user(uid, access_hash, blocked=False)
     blocked_users.discard(uid)
 
-    # If it's a new user (and not an admin testing it), send the alert to all admins
     if is_new_user and uid not in ADMIN_IDS:
         asyncio.create_task(notify_admins_new_user(user))
 
@@ -254,7 +256,6 @@ async def send_welcome_sequence(user):
                 try:
                     await client.get_messages(item["from_chat"], ids=item["msg_id"])
                 except (MessageIdInvalidError, ChatInvalidError, ChannelInvalidError):
-                    logger.warning(f"Forward source {item['msg_id']} in chat {item['from_chat']} not accessible, skipping step {step}")
                     continue
                 await client.forward_messages(full_user, item["msg_id"], item["from_chat"])
             else:
@@ -269,15 +270,10 @@ async def send_welcome_sequence(user):
             save_user(uid, access_hash, blocked=True)
             return
         except FloodWaitError as e:
-            logger.warning(f"Flood wait {e.seconds}s")
             await asyncio.sleep(e.seconds)
-        except Exception as e:
-            logger.error(f"Welcome step {step} error for {uid}: {e}")
+        except Exception:
             continue
-
-    logger.info(f"Welcome sequence completed for {uid}")
-    
-    # Decoupled from the main function so the bot doesn't freeze
+            
     asyncio.create_task(remove_welcome_cooldown(uid))
 
 @client.on(events.ChatAction())
@@ -286,7 +282,6 @@ async def chat_action(event):
         user = await event.get_user()
         if user:
             await send_welcome_sequence(user)
-            # Send menu immediately after sequence finishes
             if user.id not in ADMIN_IDS:
                 await send_user_menu(user)
 
@@ -295,7 +290,6 @@ async def join_request(event):
     try:
         user = await client.get_entity(event.user_id)
         await send_welcome_sequence(user)
-        # Send menu immediately after sequence finishes
         if event.user_id not in ADMIN_IDS:
             await send_user_menu(user)
     except Exception as e:
@@ -316,9 +310,7 @@ async def start(event):
     else:
         user = await event.get_sender()
         if user:
-            # Trigger sequence first (if they aren't on cooldown)
             await send_welcome_sequence(user)
-            # Ensure they always get the keyboard
             await send_user_menu(user)
 
 # ------------------ KEYBOARD BUTTON HANDLER ------------------
@@ -335,18 +327,22 @@ async def send_button_forward(event, key):
         return
 
     uid = event.sender_id
-    config = button_forwards.get(key)
-    if not config:
+    config_list = button_forwards.get(key)
+    
+    if not config_list:
         await event.reply("⚠️ This option is not configured yet. Please contact admin.")
         return
 
     try:
         user_peer = await client.get_input_entity(uid)
-        msg = await client.get_messages(config["from_chat"], ids=config["msg_id"])
-        if not msg:
-            await event.reply("❌ The requested message is no longer available.")
-            return
-        await client.forward_messages(user_peer, msg.id, config["from_chat"])
+        
+        # Loop through all messages saved for this button
+        for config in config_list:
+            msg = await client.get_messages(config["from_chat"], ids=config["msg_id"])
+            if msg:
+                await client.forward_messages(user_peer, msg.id, config["from_chat"])
+            await asyncio.sleep(0.3) # Small delay to prevent API flood limits
+            
     except UserIsBlockedError:
         await event.reply("❌ You have blocked the bot. Please unblock and try again.")
     except PeerIdInvalidError:
@@ -361,14 +357,17 @@ async def send_button_forward(event, key):
 @client.on(events.NewMessage(pattern=r"^(/stats|📊 Stats)$"))
 @admin_only
 async def stats(event):
+    hack_msgs = len(button_forwards.get('hack', []))
+    pred_msgs = len(button_forwards.get('prediction', []))
+    
     msg = (
         f"**📊 Statistics**\n"
         f"👥 Active: `{len(tracked_users)}`\n"
         f"🚫 Blocked: `{len(blocked_users)}`\n"
         f"📨 Sequence steps: `{len(saved_messages)}`\n"
         f"🔊 Welcome: `{'ON' if welcome_enabled else 'OFF'}`\n"
-        f"🔘 Hack button: `{'ready' if 'hack' in button_forwards else 'not set'}`\n"
-        f"🔘 Prediction button: `{'ready' if 'prediction' in button_forwards else 'not set'}`"
+        f"🔘 Hack button: `{hack_msgs} messages`\n"
+        f"🔘 Prediction button: `{pred_msgs} messages`"
     )
     await event.reply(msg)
 
@@ -376,9 +375,12 @@ async def stats(event):
 @admin_only
 async def status(event):
     steps = "\n".join(f"  {s}: {d['type']}" for s, d in sorted(saved_messages.items()))
+    hack_msgs = len(button_forwards.get('hack', []))
+    pred_msgs = len(button_forwards.get('prediction', []))
+    
     btn_status = (
-        f"🔘 Hack: {'set' if 'hack' in button_forwards else 'empty'}\n"
-        f"🔘 Prediction: {'set' if 'prediction' in button_forwards else 'empty'}"
+        f"🔘 Hack: {hack_msgs} msgs\n"
+        f"🔘 Prediction: {pred_msgs} msgs"
     )
     await event.reply(
         f"⚙️ **Status**\n"
@@ -476,22 +478,35 @@ async def set_button(event):
         return
 
     reply_msg = await event.get_reply_message()
-    if hasattr(reply_msg, "chat_id") and reply_msg.chat_id:
-        chat_id = reply_msg.chat_id
-    elif hasattr(reply_msg, "peer_id"):
-        pid = reply_msg.peer_id
-        if isinstance(pid, PeerUser):
-            chat_id = pid.user_id
-        elif isinstance(pid, PeerChannel):
-            chat_id = pid.channel_id
-        else:
-            chat_id = event.chat_id
-    else:
-        chat_id = event.chat_id
+    chat_id = get_chat_id(reply_msg, event)
 
-    save_button_config(btn_key, reply_msg.id, chat_id)
-    button_forwards[btn_key] = {"msg_id": reply_msg.id, "from_chat": chat_id}
-    await event.reply(f"✅ Button **'{btn_key}'** configured successfully.")
+    # Overwrite the button entirely
+    delete_button_config(btn_key)
+    button_forwards[btn_key] = []
+    
+    add_button_config(btn_key, reply_msg.id, chat_id)
+    button_forwards[btn_key].append({"msg_id": reply_msg.id, "from_chat": chat_id})
+    await event.reply(f"✅ Button **'{btn_key}'** set! (1 message)\n\n👉 **Tip:** Reply to another message with `/addbutton {btn_key}` to add a second message to this button!")
+
+@client.on(events.NewMessage(pattern=r"^/addbutton\s+(hack|prediction)$"))
+@admin_only
+async def add_button(event):
+    btn_key = event.pattern_match.group(1).lower()
+    if not event.is_reply:
+        await event.reply("❌ Please reply to the message you want to attach.")
+        return
+
+    if btn_key not in button_forwards:
+        button_forwards[btn_key] = []
+
+    reply_msg = await event.get_reply_message()
+    chat_id = get_chat_id(reply_msg, event)
+    
+    add_button_config(btn_key, reply_msg.id, chat_id)
+    button_forwards[btn_key].append({"msg_id": reply_msg.id, "from_chat": chat_id})
+    
+    total_msgs = len(button_forwards[btn_key])
+    await event.reply(f"✅ Additional message attached! Button **'{btn_key}'** will now send {total_msgs} messages in a row.")
 
 @client.on(events.NewMessage(pattern=r"^/clearbutton\s+(hack|prediction)$"))
 @admin_only
@@ -500,9 +515,20 @@ async def clear_button(event):
     if btn_key in button_forwards:
         del button_forwards[btn_key]
         delete_button_config(btn_key)
-        await event.reply(f"🗑 Button **'{btn_key}'** cleared.")
+        await event.reply(f"🗑 Button **'{btn_key}'** cleared completely.")
     else:
         await event.reply(f"⚠️ No configuration found for button '{btn_key}'.")
+
+def get_chat_id(reply_msg, event):
+    if hasattr(reply_msg, "chat_id") and reply_msg.chat_id:
+        return reply_msg.chat_id
+    elif hasattr(reply_msg, "peer_id"):
+        pid = reply_msg.peer_id
+        if isinstance(pid, PeerUser):
+            return pid.user_id
+        elif isinstance(pid, PeerChannel):
+            return pid.channel_id
+    return event.chat_id
 
 # ------------------ WELCOME TOGGLE ------------------
 @client.on(events.NewMessage(pattern=r"^(/togglewelcome|🔇 Toggle Welcome)$"))
@@ -554,7 +580,7 @@ async def restore(event):
         with sqlite3.connect(str(DB_PATH)) as conn:
             conn.execute("DELETE FROM users")
             conn.execute("DELETE FROM messages")
-            conn.execute("DELETE FROM button_configs")
+            conn.execute("DELETE FROM button_msgs")
             
             for uid, hsh in tracked_users.items():
                 conn.execute("INSERT OR REPLACE INTO users (user_id, access_hash, blocked) VALUES (?,?,?)", 
@@ -562,9 +588,14 @@ async def restore(event):
             for step, d in saved_messages.items():
                 conn.execute("INSERT OR REPLACE INTO messages (step, msg_type, text, msg_id, from_chat) VALUES (?,?,?,?,?)",
                              (step, d.get("type"), d.get("text"), d.get("msg_id"), d.get("from_chat")))
-            for key, cfg in button_forwards.items():
-                conn.execute("INSERT OR REPLACE INTO button_configs (btn_key, msg_id, from_chat) VALUES (?,?,?)",
-                             (key, cfg["msg_id"], cfg["from_chat"]))
+            for key, cfg_list in button_forwards.items():
+                # Handle old backup dict format or new list format seamlessly
+                if isinstance(cfg_list, dict): 
+                    cfg_list = [cfg_list]
+                    button_forwards[key] = cfg_list
+                for cfg in cfg_list:
+                    conn.execute("INSERT INTO button_msgs (btn_key, msg_id, from_chat) VALUES (?,?,?)",
+                                 (key, cfg["msg_id"], cfg["from_chat"]))
                              
         set_setting("welcome_enabled", "1" if welcome_enabled else "0")
         await event.reply(f"✅ Restored: {len(tracked_users)} users")
@@ -586,7 +617,8 @@ async def helper_buttons(event):
     elif text == "🔘 Set Button":
         await event.reply(
             "🔘 **Button Set Kaise Karein?**\n\n"
-            "👉 `/setbutton hack` ya `/setbutton prediction` command ka reply dekar message forward set karein."
+            "👉 **Step 1:** `/setbutton hack` (reply karke pehla msg daalo)\n"
+            "👉 **Step 2 (Optional):** `/addbutton hack` (reply karke dusra msg add karo)"
         )
     elif text == "🗑 Clear Button":
         await event.reply(
@@ -614,7 +646,7 @@ async def backup_restore_buttons(event):
                 with sqlite3.connect(str(DB_PATH)) as conn:
                     conn.execute("DELETE FROM users")
                     conn.execute("DELETE FROM messages")
-                    conn.execute("DELETE FROM button_configs")
+                    conn.execute("DELETE FROM button_msgs")
                     
                     for uid, hsh in tracked_users.items():
                         conn.execute("INSERT OR REPLACE INTO users (user_id, access_hash, blocked) VALUES (?,?,?)", 
@@ -622,9 +654,13 @@ async def backup_restore_buttons(event):
                     for step, d in saved_messages.items():
                         conn.execute("INSERT OR REPLACE INTO messages (step, msg_type, text, msg_id, from_chat) VALUES (?,?,?,?,?)",
                                      (step, d.get("type"), d.get("text"), d.get("msg_id"), d.get("from_chat")))
-                    for key, cfg in button_forwards.items():
-                        conn.execute("INSERT OR REPLACE INTO button_configs (btn_key, msg_id, from_chat) VALUES (?,?,?)",
-                                     (key, cfg["msg_id"], cfg["from_chat"]))
+                    for key, cfg_list in button_forwards.items():
+                        if isinstance(cfg_list, dict):
+                            cfg_list = [cfg_list]
+                            button_forwards[key] = cfg_list
+                        for cfg in cfg_list:
+                            conn.execute("INSERT INTO button_msgs (btn_key, msg_id, from_chat) VALUES (?,?,?)",
+                                         (key, cfg["msg_id"], cfg["from_chat"]))
                                      
                 set_setting("welcome_enabled", "1" if welcome_enabled else "0")
                 await event.reply(f"✅ Restored from auto‑backup. Users: {len(tracked_users)}")
@@ -661,7 +697,6 @@ async def periodic_backup():
                 "button_forwards": button_forwards,
                 "welcome": welcome_enabled,
             }
-            # Atomic backup: write to temporary file first, then replace the existing backup
             with open("auto_backup.tmp", "w") as f:
                 json.dump(data, f)
             os.replace("auto_backup.tmp", "auto_backup.json")
@@ -681,7 +716,6 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        # Standard loop initialization to prevent conflicts with Telethon's internal loop
         client.loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
