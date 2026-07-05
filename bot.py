@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import asyncio
 import logging
@@ -50,7 +51,7 @@ def parse_admin_ids(env_string):
 
 ADMIN_IDS = parse_admin_ids(os.environ.get("ADMIN_IDS", "0"))
 
-# ------------------ DATABASE ------------------
+# ------------------ DATABASE & STATE ------------------
 DB_PATH = Path("bot_data.db")
 
 tracked_users: dict[int, int] = {}      
@@ -59,6 +60,9 @@ saved_messages: dict[int, dict] = {}
 button_forwards: dict[str, list] = {}   
 welcome_enabled = True
 recently_welcomed: set[int] = set()
+
+# Naya Feature: User ko track karega ki wo Admin se chat mode me hai ya nahi
+user_chat_state: dict[int, bool] = {}
 
 def init_db():
     with sqlite3.connect(str(DB_PATH)) as conn:
@@ -198,15 +202,17 @@ async def notify_admins_new_user(user):
         except Exception as e:
             logger.error(f"Failed to alert admin {admin_id}: {e}")
 
-# ------------------ WELCOME SYSTEM ------------------
+# ------------------ WELCOME SYSTEM & MENU ------------------
 async def remove_welcome_cooldown(uid):
     await asyncio.sleep(30)
     recently_welcomed.discard(uid)
 
 async def send_user_menu(entity):
+    # Naya button 'Contact to Admin' yahan add kiya hai
     btns = [
         [Button.text("I Want Number HACK", resize=True)],
         [Button.text("How To Start COLOUR TRADING", resize=True)],
+        [Button.text("Contact to Admin", resize=True)]
     ]
     try:
         await client.send_message(
@@ -297,6 +303,9 @@ async def join_request(event):
 # ------------------ START (Keyboard for users) ------------------
 @client.on(events.NewMessage(pattern="(?i)^/start$"))
 async def start(event):
+    # Har baar jab user start dabayega, uska chat state close ho jayega clean reset ke liye
+    user_chat_state[event.sender_id] = False 
+    
     if event.sender_id in ADMIN_IDS:
         btns = [
             [Button.text("📊 Stats"), Button.text("⚙️ Status")],
@@ -313,7 +322,6 @@ async def start(event):
             await send_user_menu(user)
 
 # ------------------ FOOLPROOF BUTTON HANDLERS ------------------
-# Yeh Lambda function 100% fail-proof hai, case or spaces ka issue nahi aayega!
 @client.on(events.NewMessage(func=lambda e: e.text and "number hack" in e.text.lower()))
 async def hack_button_handler(event):
     await send_button_forward(event, "hack")
@@ -321,6 +329,16 @@ async def hack_button_handler(event):
 @client.on(events.NewMessage(func=lambda e: e.text and "colour trading" in e.text.lower()))
 async def prediction_button_handler(event):
     await send_button_forward(event, "prediction")
+
+# Contact Admin Button Handler
+@client.on(events.NewMessage(func=lambda e: e.text and "contact to admin" in e.text.lower()))
+async def contact_admin_handler(event):
+    if event.sender_id in ADMIN_IDS:
+        return
+        
+    # State open karna taaki user likh sake
+    user_chat_state[event.sender_id] = True
+    await event.reply("📝 **Admin Support**\n\nAb aap apna message ya screenshot yahan bhej sakte hain. Seedha admin ko deliver ho jayega! 👇")
 
 async def send_button_forward(event, key):
     uid = event.sender_id
@@ -330,7 +348,6 @@ async def send_button_forward(event, key):
         await event.reply("⚠️ This option is not configured yet. Please contact admin.")
         return
 
-    # Visual loading status added so you know bot is responding!
     status_msg = await event.reply("⏳ Sending requested information...")
 
     try:
@@ -338,10 +355,8 @@ async def send_button_forward(event, key):
         
         for config in config_list:
             admin_id = config["from_chat"]
-            # Fetch hash directly from memory/DB to bypass Render server resets!
             admin_hash = tracked_users.get(admin_id, 0)
             
-            # Smart peer reconstruction
             if admin_id > 0 and admin_hash:
                 from_peer = InputPeerUser(admin_id, admin_hash)
             else:
@@ -358,7 +373,7 @@ async def send_button_forward(event, key):
         if sent_count == 0:
             await status_msg.edit("❌ The configured messages are unavailable or deleted. Admin needs to reset them.")
         else:
-            await status_msg.delete() # Successful, hide the loading message
+            await status_msg.delete() 
             
     except UserIsBlockedError:
         await status_msg.edit("❌ You have blocked the bot. Please unblock and try again.")
@@ -369,6 +384,43 @@ async def send_button_forward(event, key):
     except Exception as e:
         logger.error(f"Button {key} error for {uid}: {e}")
         await status_msg.edit("❌ Something went wrong. Please try again later.")
+
+
+# ------------------ DIRECT MESSAGE (MANUAL SEND) ------------------
+@client.on(events.NewMessage(pattern=r"^/send\s+(\d+)(?:\s+(.+))?"))
+@admin_only
+async def send_dm(event):
+    target_uid = int(event.pattern_match.group(1))
+    text_msg = event.pattern_match.group(2)
+    
+    if target_uid not in tracked_users:
+        await event.reply("❌ Error: Ye user hamare database mein nahi hai ya isne bot abhi tak start nahi kiya hai.")
+        return
+        
+    try:
+        peer = InputPeerUser(target_uid, tracked_users[target_uid])
+        
+        if event.is_reply:
+            reply_msg = await event.get_reply_message()
+            await client.send_message(peer, text_msg or reply_msg.text or "", file=reply_msg.media)
+        elif text_msg:
+            await client.send_message(peer, text_msg.strip())
+        else:
+            await event.reply("❌ Bhai message bhi toh likh ya kisi file par reply kar!\n**Format:** `/send <user_id> <message>`")
+            return
+            
+        # Admin ne message kiya hai toh user ka reply state automatically open kar do
+        user_chat_state[target_uid] = True
+        await event.reply(f"✅ Direct message sent successfully to `{target_uid}`!")
+        
+    except UserIsBlockedError:
+        await event.reply("❌ Message failed: Is user ne bot ko block kar diya hai.")
+    except PeerIdInvalidError:
+        await event.reply("❌ Message failed: Bot is user ko contact nahi kar paa raha (Peer Invalid).")
+    except Exception as e:
+        logger.error(f"DM send error to {target_uid}: {e}")
+        await event.reply(f"❌ Failed to send message: {e}")
+
 
 # ------------------ STATS / STATUS ------------------
 @client.on(events.NewMessage(pattern=r"^(/stats|📊 Stats)$"))
@@ -497,7 +549,6 @@ async def set_button(event):
     reply_msg = await event.get_reply_message()
     chat_id = get_chat_id(reply_msg, event)
 
-    # Overwrite the button entirely
     delete_button_config(btn_key)
     button_forwards[btn_key] = []
     
@@ -700,6 +751,84 @@ async def cleanup(event):
         tracked_users.pop(uid, None)
     blocked_users.clear()
     await event.reply("🧹 Blocked users removed from DB and memory.")
+
+# ------------------ TWO-WAY SEAMLESS CHAT (MODMAIL) ------------------
+@client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
+async def seamless_chat_handler(event):
+    text = event.raw_text.lower() if event.raw_text else ""
+    
+    # Ignore Commands aur Keyboard button text
+    if text.startswith('/'):
+        return
+    if "number hack" in text or "colour trading" in text or "contact to admin" in text:
+        return
+
+    if event.sender_id not in ADMIN_IDS:
+        # --- USER BHEJ RAHA HAI ADMIN KO ---
+        
+        # Check if user has tapped "Contact to Admin"
+        if user_chat_state.get(event.sender_id):
+            user = await event.get_sender()
+            name = user.first_name or "User"
+            
+            caption = f"📩 **New Message from [{name}](tg://user?id={event.sender_id})**\n🆔 `{event.sender_id}`"
+            
+            if event.raw_text:
+                caption += f"\n\n**Message:**\n{event.raw_text}"
+                
+            for admin_id in ADMIN_IDS:
+                try:
+                    await client.send_message(admin_id, caption, file=event.media)
+                except Exception:
+                    pass
+        else:
+            # Agar bina button dabaye chat kar raha hai, toh Message DELETE karo aur Warning do!
+            try:
+                await event.delete()
+            except Exception:
+                pass
+            
+            warning_msg = await event.respond("⚠️ **Direct messages are disabled.**\n👉 Please use the **'Contact to Admin'** button below to speak with us.")
+            
+            # 5 second baad warning message automatically delete ho jayega (Chat clean rahegi)
+            await asyncio.sleep(5)
+            try:
+                await warning_msg.delete()
+            except Exception:
+                pass
+
+    else:
+        # --- ADMIN REPLY KAR RAHA HAI USER KO ---
+        if event.is_reply:
+            replied_msg = await event.get_reply_message()
+            replied_text = replied_msg.raw_text or ""
+            
+            # Agar replied message me hamara '🆔' tag hai
+            match = re.search(r"🆔 `(\d+)`", replied_text)
+            if match:
+                target_uid = int(match.group(1))
+                
+                try:
+                    access_hash = tracked_users.get(target_uid, 0)
+                    if access_hash:
+                        peer = InputPeerUser(target_uid, access_hash)
+                    else:
+                        peer = target_uid 
+                        
+                    if event.raw_text:
+                        await client.send_message(peer, event.raw_text, file=event.media)
+                    elif event.media:
+                        await client.send_message(peer, file=event.media)
+                        
+                    # Admin ka reply gaya, matlab connection ban gaya, toh state open kardo
+                    user_chat_state[target_uid] = True
+                    await event.reply("✅ **Message delivered to user!**")
+                except UserIsBlockedError:
+                    await event.reply("❌ **Failed:** Is user ne bot block kar diya hai.")
+                except PeerIdInvalidError:
+                    await event.reply("❌ **Failed:** Bot is user ko contact nahi kar paa raha.")
+                except Exception as e:
+                    await event.reply(f"❌ **Error:** {e}")
 
 # ------------------ AUTO BACKUP ------------------
 async def periodic_backup():
