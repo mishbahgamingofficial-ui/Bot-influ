@@ -40,7 +40,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", 10000))
 SESSION_STRING = os.environ.get("SESSION_STRING", "")
 
-# Safely parse Admin IDs, allowing for negative IDs (groups/channels)
+# Safely parse Admin IDs
 def parse_admin_ids(env_string):
     ids = []
     for uid in env_string.split(","):
@@ -61,8 +61,10 @@ button_forwards: dict[str, list] = {}
 welcome_enabled = True
 recently_welcomed: set[int] = set()
 
-# Naya Feature: User ko track karega ki wo Admin se chat mode me hai ya nahi
 user_chat_state: dict[int, bool] = {}
+
+# NAYA: Admin Send Message State Tracker
+admin_chat_state: dict[int, dict] = {}
 
 def init_db():
     with sqlite3.connect(str(DB_PATH)) as conn:
@@ -186,11 +188,13 @@ async def notify_admins_new_user(user):
     first_name = user.first_name or ""
     last_name = user.last_name or ""
     full_name = f"{first_name} {last_name}".strip() or "Unknown"
-    username = f"@{user.username}" if user.username else "None"
+    
+    linked_name = f"[{full_name}](tg://user?id={user.id})"
+    username = f"@{user.username}" if user.username else f"[Direct Profile Link](tg://user?id={user.id})"
     
     text = (
         f"🚨 **New User Alert!**\n\n"
-        f"👤 **Name:** {full_name}\n"
+        f"👤 **Name:** {linked_name}\n"
         f"🔗 **Username:** {username}\n"
         f"🆔 **ID:** `{user.id}`\n"
         f"📅 **Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -208,7 +212,6 @@ async def remove_welcome_cooldown(uid):
     recently_welcomed.discard(uid)
 
 async def send_user_menu(entity):
-    # Naya button 'Contact to Admin' yahan add kiya hai
     btns = [
         [Button.text("I Want Number HACK", resize=True)],
         [Button.text("How To Start COLOUR TRADING", resize=True)],
@@ -303,16 +306,19 @@ async def join_request(event):
 # ------------------ START (Keyboard for users) ------------------
 @client.on(events.NewMessage(pattern="(?i)^/start$"))
 async def start(event):
-    # Har baar jab user start dabayega, uska chat state close ho jayega clean reset ke liye
     user_chat_state[event.sender_id] = False 
+    # Cancel any active admin send-state on /start
+    admin_chat_state.pop(event.sender_id, None)
     
     if event.sender_id in ADMIN_IDS:
+        # NAYA 'Send Message' button add ho gaya hai panel mein
         btns = [
             [Button.text("📊 Stats"), Button.text("⚙️ Status")],
-            [Button.text("📢 Broadcast"), Button.text("🔢 Set Sequence")],
+            [Button.text("📢 Broadcast"), Button.text("✉️ Send Message")],
+            [Button.text("🔢 Set Sequence"), Button.text("🔇 Toggle Welcome")],
             [Button.text("📁 Backup"), Button.text("🔄 Restore")],
-            [Button.text("🔇 Toggle Welcome"), Button.text("🧹 Cleanup")],
             [Button.text("🔘 Set Button"), Button.text("🗑 Clear Button")],
+            [Button.text("🧹 Cleanup")]
         ]
         await event.reply("👨‍💻 **Admin Panel**", buttons=btns)
     else:
@@ -330,13 +336,11 @@ async def hack_button_handler(event):
 async def prediction_button_handler(event):
     await send_button_forward(event, "prediction")
 
-# Contact Admin Button Handler
 @client.on(events.NewMessage(func=lambda e: e.text and "contact to admin" in e.text.lower()))
 async def contact_admin_handler(event):
     if event.sender_id in ADMIN_IDS:
         return
         
-    # State open karna taaki user likh sake
     user_chat_state[event.sender_id] = True
     await event.reply("📝 **Admin Support**\n\nAb aap apna message ya screenshot yahan bhej sakte hain. Seedha admin ko deliver ho jayega! 👇")
 
@@ -386,10 +390,103 @@ async def send_button_forward(event, key):
         await status_msg.edit("❌ Something went wrong. Please try again later.")
 
 
-# ------------------ DIRECT MESSAGE (MANUAL SEND) ------------------
+# ------------------ DIRECT MESSAGE (SMART BUTTON SYSTEM) ------------------
+
+# Step 1: Handle 'Send Message' button click
+@client.on(events.NewMessage(pattern=r"^✉️ Send Message$"))
+@admin_only
+async def btn_send_dm_start(event):
+    admin_id = event.sender_id
+    
+    # Prompt bhejo aur bot memory mein record karo
+    prompt = await event.reply("👤 **Kisko message bhejna hai?**\n\n👉 Niche us user ki **ID** type karke bhejo:\n*(Cancel karne ke liye /cancel likho)*")
+    
+    admin_chat_state[admin_id] = {
+        "step": "waiting_for_id",
+        "target_id": None,
+        "delete_msgs": [event.id, prompt.id] # Button click aur ye prompt yaad rakho delete karne ke liye
+    }
+
+# Cancel Command
+@client.on(events.NewMessage(pattern=r"^/cancel$"))
+@admin_only
+async def cancel_state(event):
+    if event.sender_id in admin_chat_state:
+        del admin_chat_state[event.sender_id]
+        await event.reply("🚫 **Action cancelled.**")
+
+# Step 2 & 3: Handle the Smart Logic
+@client.on(events.NewMessage(func=lambda e: e.sender_id in ADMIN_IDS and e.sender_id in admin_chat_state))
+async def handle_admin_chat_state(event):
+    admin_id = event.sender_id
+    state = admin_chat_state[admin_id]
+    
+    if event.text and event.text.startswith('/'):
+        return # Let commands process normally
+        
+    if state["step"] == "waiting_for_id":
+        text = event.text.strip()
+        # Check agar user ne sahi me number (ID) daali hai
+        if text.lstrip('-').isdigit():
+            target_id = int(text)
+            state["target_id"] = target_id
+            state["step"] = "waiting_for_msg"
+            
+            # Jo ID daali hai, usko delete list me add karo
+            state["delete_msgs"].append(event.id)
+            
+            # Jadoo (Magic) - Puraane messages delete kardo chat clean rakhne ke liye
+            try:
+                await client.delete_messages(admin_id, state["delete_msgs"])
+            except Exception:
+                pass
+                
+            prompt = await event.respond(f"✅ Target ID Set: `{target_id}`\n\n✍️ **Ab apna Message, Photo ya Video bhejo:**\n*(Cancel karne ke liye /cancel likho)*")
+            state["delete_msgs"] = [prompt.id] # Naya prompt record karo
+        else:
+            await event.reply("❌ Invalid ID! Sirf numbers allow hain. Phir se target ID type karo:")
+            
+    elif state["step"] == "waiting_for_msg":
+        target_id = state["target_id"]
+        
+        try:
+            # Puraana Prompt Delete kardo!
+            try:
+                await client.delete_messages(admin_id, state["delete_msgs"])
+            except Exception:
+                pass
+                
+            access_hash = tracked_users.get(target_id, 0)
+            peer = InputPeerUser(target_id, access_hash) if access_hash else target_id
+            
+            if event.text:
+                await client.send_message(peer, event.text, file=event.media)
+            elif event.media:
+                await client.send_message(peer, file=event.media)
+                
+            user_chat_state[target_id] = True # Open user's chat state automatically
+            await event.respond(f"✅ **Message successfully delivered to `{target_id}`!**")
+            
+            # Memory clear kardo
+            del admin_chat_state[admin_id]
+            
+        except UserIsBlockedError:
+            await event.respond("❌ **Failed:** Is user ne bot block kar diya hai.")
+            del admin_chat_state[admin_id]
+        except PeerIdInvalidError:
+            await event.respond("❌ **Failed:** Bot is user ko contact nahi kar paa raha.")
+            del admin_chat_state[admin_id]
+        except Exception as e:
+            await event.respond(f"❌ **Error:** {e}")
+            del admin_chat_state[admin_id]
+            
+    raise events.StopPropagation # Stop here, don't trigger seamless chat reply logic accidentally
+
+
+# Purana manual command bhi rakhte hain, just in case shortcut use karna ho
 @client.on(events.NewMessage(pattern=r"^/send\s+(\d+)(?:\s+(.+))?"))
 @admin_only
-async def send_dm(event):
+async def send_dm_manual(event):
     target_uid = int(event.pattern_match.group(1))
     text_msg = event.pattern_match.group(2)
     
@@ -409,16 +506,10 @@ async def send_dm(event):
             await event.reply("❌ Bhai message bhi toh likh ya kisi file par reply kar!\n**Format:** `/send <user_id> <message>`")
             return
             
-        # Admin ne message kiya hai toh user ka reply state automatically open kar do
         user_chat_state[target_uid] = True
         await event.reply(f"✅ Direct message sent successfully to `{target_uid}`!")
         
-    except UserIsBlockedError:
-        await event.reply("❌ Message failed: Is user ne bot ko block kar diya hai.")
-    except PeerIdInvalidError:
-        await event.reply("❌ Message failed: Bot is user ko contact nahi kar paa raha (Peer Invalid).")
     except Exception as e:
-        logger.error(f"DM send error to {target_uid}: {e}")
         await event.reply(f"❌ Failed to send message: {e}")
 
 
@@ -755,18 +846,19 @@ async def cleanup(event):
 # ------------------ TWO-WAY SEAMLESS CHAT (MODMAIL) ------------------
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
 async def seamless_chat_handler(event):
+    # Agar admin state mein hai (ID type kar raha hai), toh yaha interrupt na ho
+    if event.sender_id in admin_chat_state:
+        return
+
     text = event.raw_text.lower() if event.raw_text else ""
     
-    # Ignore Commands aur Keyboard button text
-    if text.startswith('/'):
+    if text.startswith('/') or "✉️ send message" in text or "📢 broadcast" in text or "📊 stats" in text or "⚙️ status" in text or "🔢 set sequence" in text or "🔇 toggle welcome" in text or "📁 backup" in text or "🔄 restore" in text or "🔘 set button" in text or "🗑 clear button" in text or "🧹 cleanup" in text:
         return
     if "number hack" in text or "colour trading" in text or "contact to admin" in text:
         return
 
     if event.sender_id not in ADMIN_IDS:
         # --- USER BHEJ RAHA HAI ADMIN KO ---
-        
-        # Check if user has tapped "Contact to Admin"
         if user_chat_state.get(event.sender_id):
             user = await event.get_sender()
             name = user.first_name or "User"
@@ -782,32 +874,25 @@ async def seamless_chat_handler(event):
                 except Exception:
                     pass
         else:
-            # Agar bina button dabaye chat kar raha hai, toh Message DELETE karo aur Warning do!
             try:
                 await event.delete()
             except Exception:
                 pass
-            
             warning_msg = await event.respond("⚠️ **Direct messages are disabled.**\n👉 Please use the **'Contact to Admin'** button below to speak with us.")
-            
-            # 5 second baad warning message automatically delete ho jayega (Chat clean rahegi)
             await asyncio.sleep(5)
             try:
                 await warning_msg.delete()
             except Exception:
                 pass
-
     else:
         # --- ADMIN REPLY KAR RAHA HAI USER KO ---
         if event.is_reply:
             replied_msg = await event.get_reply_message()
             replied_text = replied_msg.raw_text or ""
             
-            # Agar replied message me hamara '🆔' tag hai
             match = re.search(r"🆔 `(\d+)`", replied_text)
             if match:
                 target_uid = int(match.group(1))
-                
                 try:
                     access_hash = tracked_users.get(target_uid, 0)
                     if access_hash:
@@ -820,7 +905,6 @@ async def seamless_chat_handler(event):
                     elif event.media:
                         await client.send_message(peer, file=event.media)
                         
-                    # Admin ka reply gaya, matlab connection ban gaya, toh state open kardo
                     user_chat_state[target_uid] = True
                     await event.reply("✅ **Message delivered to user!**")
                 except UserIsBlockedError:
