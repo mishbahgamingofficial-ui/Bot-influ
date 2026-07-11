@@ -63,6 +63,7 @@ recently_welcomed: set[int] = set()
 
 user_chat_state: dict[int, bool] = {}
 admin_chat_state: dict[int, dict] = {}
+auto_replies: dict[str, str] = {}
 
 def init_db():
     with sqlite3.connect(str(DB_PATH)) as conn:
@@ -89,11 +90,15 @@ def init_db():
                 msg_id INTEGER NOT NULL,
                 from_chat INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS auto_replies (
+                keyword TEXT PRIMARY KEY,
+                response TEXT
+            );
         """)
         return conn
 
 def load_from_db():
-    global tracked_users, blocked_users, saved_messages, button_forwards, welcome_enabled
+    global tracked_users, blocked_users, saved_messages, button_forwards, welcome_enabled, auto_replies
     with sqlite3.connect(str(DB_PATH)) as conn:
         cur = conn.cursor()
         cur.execute("SELECT user_id, access_hash, blocked FROM users")
@@ -120,8 +125,11 @@ def load_from_db():
         if row:
             welcome_enabled = row[0] == "1"
             
-    logger.info(f"Loaded {len(tracked_users)} users, {len(blocked_users)} blocked, "
-                f"{len(saved_messages)} messages, {len(button_forwards)} buttons configured")
+        cur.execute("SELECT keyword, response FROM auto_replies")
+        for kw, resp in cur.fetchall():
+            auto_replies[kw] = resp
+            
+    logger.info(f"Loaded {len(tracked_users)} users, {len(auto_replies)} auto-replies.")
 
 def save_user(uid: int, access_hash: int, blocked: bool = False):
     with sqlite3.connect(str(DB_PATH)) as conn:
@@ -187,7 +195,6 @@ async def notify_admins_new_user(user):
     last_name = user.last_name or ""
     full_name = f"{first_name} {last_name}".strip()
     
-    # Safe Link Filter
     safe_name = full_name.replace('[', '').replace(']', '').replace('*', '').replace('_', '').replace('`', '')
     if not safe_name.strip():
         safe_name = "Unknown User"
@@ -212,7 +219,7 @@ async def notify_admins_new_user(user):
         try:
             await client.send_message(admin_id, text)
         except Exception as e:
-            logger.error(f"Failed to alert admin {admin_id}: {e}")
+            pass
 
 # ------------------ WELCOME SYSTEM & MENU ------------------
 async def remove_welcome_cooldown(uid):
@@ -231,8 +238,8 @@ async def send_user_menu(entity):
             "👋 Welcome! Tap a button below to receive the information.",
             buttons=btns
         )
-    except Exception as e:
-        logger.error(f"Failed to send user menu: {e}")
+    except Exception:
+        pass
 
 async def send_welcome_sequence(user):
     uid = user.id
@@ -249,7 +256,6 @@ async def send_welcome_sequence(user):
             return
         access_hash = full_user.access_hash
     except Exception as e:
-        logger.warning(f"Cannot get entity for {uid}: {e}")
         return
 
     is_new_user = uid not in tracked_users
@@ -271,7 +277,7 @@ async def send_welcome_sequence(user):
             if item["type"] == "forward":
                 try:
                     await client.get_messages(item["from_chat"], ids=item["msg_id"])
-                except (MessageIdInvalidError, ChatInvalidError, ChannelInvalidError):
+                except Exception:
                     continue
                 await client.forward_messages(full_user, item["msg_id"], item["from_chat"])
             else:
@@ -308,8 +314,8 @@ async def join_request(event):
         await send_welcome_sequence(user)
         if event.user_id not in ADMIN_IDS:
             await send_user_menu(user)
-    except Exception as e:
-        logger.error(f"Join request error: {e}")
+    except Exception:
+        pass
 
 # ------------------ START (Keyboard for users) ------------------
 @client.on(events.NewMessage(pattern="(?i)^/start$"))
@@ -326,14 +332,14 @@ async def start(event):
             [Button.text("🔘 Set Button"), Button.text("🗑 Clear Button")],
             [Button.text("🧹 Cleanup")]
         ]
-        await event.reply("👨‍💻 **Admin Panel**", buttons=btns)
+        await event.reply("👨‍💻 **Admin Panel**\n*(To view Auto-Replies, send /listreplies)*", buttons=btns)
     else:
         user = await event.get_sender()
         if user:
             await send_welcome_sequence(user)
             await send_user_menu(user)
 
-# ------------------ FOOLPROOF BUTTON HANDLERS ------------------
+# ------------------ FOOLPROOF BUTTON HANDLERS & HACKER ANIMATION ------------------
 @client.on(events.NewMessage(func=lambda e: e.text and "number hack" in e.text.lower()))
 async def hack_button_handler(event):
     await send_button_forward(event, "hack")
@@ -358,37 +364,43 @@ async def send_button_forward(event, key):
         await event.reply("⚠️ This option is not configured yet. Please contact admin.")
         return
 
-    status_msg = await event.reply("⏳ Sending requested information...")
+    # 🔥 THE HACKER TERMINAL ANIMATION 🔥
+    if key == "hack":
+        status_msg = await event.reply("💻 `[root@bot]~ Connecting to VIP Server...`")
+        await asyncio.sleep(0.6)
+        
+        await status_msg.edit("🛠️ `[root@bot]~ Bypassing Firewall [████░░░░] 45%`")
+        await asyncio.sleep(0.6)
+        
+        await status_msg.edit("📂 `[root@bot]~ Extracting Data  [████████] 100%`")
+        await asyncio.sleep(0.6)
+        
+        await status_msg.edit("✅ **ACCESS GRANTED!** Sending files... 🚀")
+        await asyncio.sleep(0.4)
+    else:
+        status_msg = await event.reply("⏳ Sending requested information...")
 
     try:
         sent_count = 0
-        
         for config in config_list:
             admin_id = config["from_chat"]
             admin_hash = tracked_users.get(admin_id, 0)
-            
-            if admin_id > 0 and admin_hash:
-                from_peer = InputPeerUser(admin_id, admin_hash)
-            else:
-                from_peer = admin_id 
-
+            from_peer = InputPeerUser(admin_id, admin_hash) if (admin_id > 0 and admin_hash) else admin_id 
             try:
                 await client.forward_messages(uid, config["msg_id"], from_peer)
                 sent_count += 1
             except Exception as inner_e:
                 logger.warning(f"Could not forward msg {config['msg_id']} for {uid}: {inner_e}")
-                
             await asyncio.sleep(0.3) 
             
         if sent_count == 0:
             await status_msg.edit("❌ The configured messages are unavailable or deleted. Admin needs to reset them.")
         else:
+            await asyncio.sleep(1)
             await status_msg.delete() 
             
     except UserIsBlockedError:
         await status_msg.edit("❌ You have blocked the bot. Please unblock and try again.")
-    except PeerIdInvalidError:
-        await status_msg.edit("❌ Could not send you the message. Please start the bot again.")
     except FloodWaitError as e:
         await status_msg.edit(f"⏳ Too many requests, please wait {e.seconds} seconds.")
     except Exception as e:
@@ -431,12 +443,10 @@ async def handle_admin_chat_state(event):
             state["target_id"] = target_id
             state["step"] = "waiting_for_msg"
             state["delete_msgs"].append(event.id)
-            
             try:
                 await client.delete_messages(admin_id, state["delete_msgs"])
             except Exception:
                 pass
-                
             prompt = await event.respond(f"✅ Target ID Set: `{target_id}`\n\n✍️ **Ab apna Message, Photo ya Video bhejo:**\n*(Cancel karne ke liye /cancel likho)*")
             state["delete_msgs"] = [prompt.id] 
         else:
@@ -444,13 +454,11 @@ async def handle_admin_chat_state(event):
             
     elif state["step"] == "waiting_for_msg":
         target_id = state["target_id"]
-        
         try:
             try:
                 await client.delete_messages(admin_id, state["delete_msgs"])
             except Exception:
                 pass
-                
             access_hash = tracked_users.get(target_id, 0)
             peer = InputPeerUser(target_id, access_hash) if access_hash else target_id
             
@@ -462,64 +470,81 @@ async def handle_admin_chat_state(event):
             user_chat_state[target_id] = True 
             await event.respond(f"✅ **Message successfully delivered to `{target_id}`!**")
             del admin_chat_state[admin_id]
-            
-        except UserIsBlockedError:
-            await event.respond("❌ **Failed:** Is user ne bot block kar diya hai.")
-            del admin_chat_state[admin_id]
-        except PeerIdInvalidError:
-            await event.respond("❌ **Failed:** Bot is user ko contact nahi kar paa raha.")
-            del admin_chat_state[admin_id]
         except Exception as e:
             await event.respond(f"❌ **Error:** {e}")
             del admin_chat_state[admin_id]
             
     raise events.StopPropagation 
 
-
 @client.on(events.NewMessage(pattern=r"^/send\s+(\d+)(?:\s+(.+))?"))
 @admin_only
 async def send_dm_manual(event):
     target_uid = int(event.pattern_match.group(1))
     text_msg = event.pattern_match.group(2)
-    
-    if target_uid not in tracked_users:
-        await event.reply("❌ Error: Ye user hamare database mein nahi hai ya isne bot abhi tak start nahi kiya hai.")
-        return
-        
     try:
-        peer = InputPeerUser(target_uid, tracked_users[target_uid])
-        
+        peer = InputPeerUser(target_uid, tracked_users.get(target_uid, 0))
         if event.is_reply:
             reply_msg = await event.get_reply_message()
             await client.send_message(peer, text_msg or reply_msg.text or "", file=reply_msg.media)
         elif text_msg:
             await client.send_message(peer, text_msg.strip())
-        else:
-            await event.reply("❌ Bhai message bhi toh likh ya kisi file par reply kar!\n**Format:** `/send <user_id> <message>`")
-            return
-            
         user_chat_state[target_uid] = True
-        await event.reply(f"✅ Direct message sent successfully to `{target_uid}`!")
-        
+        await event.reply(f"✅ Direct message sent to `{target_uid}`!")
     except Exception as e:
         await event.reply(f"❌ Failed to send message: {e}")
 
+# 🔥 ------------------ AUTO-RESPONDER COMMANDS ------------------ 🔥
+@client.on(events.NewMessage(pattern=r"^/setreply\s+(.+?)\s*\|\s*(.+)"))
+@admin_only
+async def set_auto_reply(event):
+    keyword = event.pattern_match.group(1).strip().lower()
+    response = event.pattern_match.group(2).strip()
+    
+    auto_replies[keyword] = response
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        conn.execute("INSERT OR REPLACE INTO auto_replies (keyword, response) VALUES (?, ?)", (keyword, response))
+        
+    await event.reply(f"✅ **Auto-Reply Set!**\n\n🔑 **Keyword:** `{keyword}`\n🤖 **Response:**\n{response}")
 
-# ------------------ STATS / STATUS ------------------
+@client.on(events.NewMessage(pattern=r"^/delreply\s+(.+)"))
+@admin_only
+async def del_auto_reply(event):
+    keyword = event.pattern_match.group(1).strip().lower()
+    if keyword in auto_replies:
+        del auto_replies[keyword]
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            conn.execute("DELETE FROM auto_replies WHERE keyword=?", (keyword,))
+        await event.reply(f"🗑 **Auto-reply deleted** for keyword: `{keyword}`")
+    else:
+        await event.reply(f"⚠️ Keyword `{keyword}` not found.")
+
+@client.on(events.NewMessage(pattern=r"^/listreplies$"))
+@admin_only
+async def list_auto_replies(event):
+    if not auto_replies:
+        await event.reply("📭 No auto-replies are set right now.")
+        return
+        
+    msg = "🤖 **Active Auto-Replies:**\n\n"
+    for kw, resp in auto_replies.items():
+        short_resp = resp[:30] + "..." if len(resp) > 30 else resp
+        msg += f"🔹 **{kw}** ➡ {short_resp}\n"
+    await event.reply(msg)
+
+# ------------------ STATS / STATUS / BROADCAST / SETTINGS ------------------
 @client.on(events.NewMessage(pattern=r"^(/stats|📊 Stats)$"))
 @admin_only
 async def stats(event):
     hack_msgs = len(button_forwards.get('hack', []))
     pred_msgs = len(button_forwards.get('prediction', []))
-    
     msg = (
         f"**📊 Statistics**\n"
         f"👥 Active: `{len(tracked_users)}`\n"
         f"🚫 Blocked: `{len(blocked_users)}`\n"
         f"📨 Sequence steps: `{len(saved_messages)}`\n"
+        f"🤖 Auto-Replies: `{len(auto_replies)}`\n"
         f"🔊 Welcome: `{'ON' if welcome_enabled else 'OFF'}`\n"
-        f"🔘 Hack button: `{hack_msgs} messages`\n"
-        f"🔘 Prediction button: `{pred_msgs} messages`"
+        f"🔘 Hack btn: `{hack_msgs}` | 🔘 Prediction btn: `{pred_msgs}`"
     )
     await event.reply(msg)
 
@@ -527,33 +552,14 @@ async def stats(event):
 @admin_only
 async def status(event):
     steps = "\n".join(f"  {s}: {d['type']}" for s, d in sorted(saved_messages.items()))
-    hack_msgs = len(button_forwards.get('hack', []))
-    pred_msgs = len(button_forwards.get('prediction', []))
-    
-    btn_status = (
-        f"🔘 Hack: {hack_msgs} msgs\n"
-        f"🔘 Prediction: {pred_msgs} msgs"
-    )
-    await event.reply(
-        f"⚙️ **Status**\n"
-        f"Users: `{len(tracked_users)}`\n"
-        f"Blocked: `{len(blocked_users)}`\n"
-        f"Sequence:\n{steps if steps else 'none'}\n"
-        f"{btn_status}"
-    )
+    await event.reply(f"⚙️ **Status**\nUsers: `{len(tracked_users)}`\nBlocked: `{len(blocked_users)}`\nSequence:\n{steps if steps else 'none'}")
 
-# ------------------ BROADCAST ------------------
 @client.on(events.NewMessage(pattern=r"^/broadcast"))
 @admin_only
 async def broadcast(event):
-    if not tracked_users:
-        await event.reply("❌ No users.")
-        return
-
+    if not tracked_users: return await event.reply("❌ No users.")
     text = event.text.replace("/broadcast", "").strip()
-    if not text and not event.is_reply:
-        await event.reply("❌ Reply to a message or provide text.")
-        return
+    if not text and not event.is_reply: return await event.reply("❌ Reply to a message or provide text.")
 
     status_msg = await event.reply(f"📢 Broadcasting to {len(tracked_users)}...")
     success = fail = skip = 0
@@ -564,11 +570,6 @@ async def broadcast(event):
             continue
         try:
             peer = await client.get_input_entity(uid)
-        except Exception:
-            fail += 1
-            continue
-
-        try:
             if event.is_reply:
                 reply_msg = await event.get_reply_message()
                 await client.forward_messages(peer, reply_msg.id, reply_msg.chat_id)
@@ -576,30 +577,16 @@ async def broadcast(event):
                 await client.send_message(peer, text)
             success += 1
             await asyncio.sleep(0.3)
-        except FloodWaitError as e:
-            await asyncio.sleep(e.seconds)
-        except (UserIsBlockedError, PeerIdInvalidError):
-            blocked_users.add(uid)
-            save_user(uid, old_hash, blocked=True)
-            fail += 1
-        except Exception as e:
-            logger.error(f"Broadcast to {uid}: {e}")
+        except Exception:
             fail += 1
 
-    await status_msg.edit(
-        f"✅ **Broadcast done**\n"
-        f"✅ Delivered: `{success}`\n"
-        f"❌ Failed: `{fail}`\n"
-        f"⏭ Skipped: `{skip}`"
-    )
+    await status_msg.edit(f"✅ **Broadcast done**\n✅ Delivered: `{success}`\n❌ Failed: `{fail}`\n⏭ Skipped: `{skip}`")
 
-# ------------------ SEQUENCE ------------------
 @client.on(events.NewMessage(pattern=r"^/setmsg(\d+)(?:\s+(.+))?"))
 @admin_only
 async def setmsg(event):
     step = int(event.pattern_match.group(1))
     extra = event.pattern_match.group(2)
-    
     if event.is_reply:
         reply_msg = await event.get_reply_message()
         data = {"type": "forward", "msg_id": reply_msg.id, "from_chat": event.chat_id}
@@ -610,54 +597,38 @@ async def setmsg(event):
             del saved_messages[step]
             with sqlite3.connect(str(DB_PATH)) as conn:
                 conn.execute("DELETE FROM messages WHERE step=?", (step,))
-            await event.reply(f"🗑 Step {step} removed.")
-            return
+            return await event.reply(f"🗑 Step {step} removed.")
         else:
-            await event.reply("❌ Please provide text or reply to a message.")
-            return
+            return await event.reply("❌ Please provide text or reply to a message.")
 
     saved_messages[step] = data
     save_message_step(step, data)
     await event.reply(f"✅ Step {step} saved as `{data['type']}`.")
 
-# ------------------ BUTTON CONFIGURATION ------------------
 @client.on(events.NewMessage(pattern=r"^/setbutton\s+(hack|prediction)$"))
 @admin_only
 async def set_button(event):
     btn_key = event.pattern_match.group(1).lower()
-    if not event.is_reply:
-        await event.reply("❌ Please reply to the message you want to forward for this button.")
-        return
-
+    if not event.is_reply: return await event.reply("❌ Please reply to the message you want to forward.")
     reply_msg = await event.get_reply_message()
     chat_id = get_chat_id(reply_msg, event)
-
     delete_button_config(btn_key)
     button_forwards[btn_key] = []
-    
     add_button_config(btn_key, reply_msg.id, chat_id)
     button_forwards[btn_key].append({"msg_id": reply_msg.id, "from_chat": chat_id})
-    await event.reply(f"✅ Button **'{btn_key}'** set! (1 message)\n\n👉 **Tip:** Reply to another message with `/addbutton {btn_key}` to add a second message to this button!")
+    await event.reply(f"✅ Button **'{btn_key}'** set! (1 message)\n\n👉 **Tip:** Use `/addbutton {btn_key}` to add more.")
 
 @client.on(events.NewMessage(pattern=r"^/addbutton\s+(hack|prediction)$"))
 @admin_only
 async def add_button(event):
     btn_key = event.pattern_match.group(1).lower()
-    if not event.is_reply:
-        await event.reply("❌ Please reply to the message you want to attach.")
-        return
-
-    if btn_key not in button_forwards:
-        button_forwards[btn_key] = []
-
+    if not event.is_reply: return await event.reply("❌ Please reply to the message.")
+    if btn_key not in button_forwards: button_forwards[btn_key] = []
     reply_msg = await event.get_reply_message()
     chat_id = get_chat_id(reply_msg, event)
-    
     add_button_config(btn_key, reply_msg.id, chat_id)
     button_forwards[btn_key].append({"msg_id": reply_msg.id, "from_chat": chat_id})
-    
-    total_msgs = len(button_forwards[btn_key])
-    await event.reply(f"✅ Additional message attached! Button **'{btn_key}'** will now send {total_msgs} messages in a row.")
+    await event.reply(f"✅ Additional message attached! Total: {len(button_forwards[btn_key])}")
 
 @client.on(events.NewMessage(pattern=r"^/clearbutton\s+(hack|prediction)$"))
 @admin_only
@@ -668,20 +639,16 @@ async def clear_button(event):
         delete_button_config(btn_key)
         await event.reply(f"🗑 Button **'{btn_key}'** cleared completely.")
     else:
-        await event.reply(f"⚠️ No configuration found for button '{btn_key}'.")
+        await event.reply(f"⚠️ No configuration found.")
 
 def get_chat_id(reply_msg, event):
-    if hasattr(reply_msg, "chat_id") and reply_msg.chat_id:
-        return reply_msg.chat_id
+    if hasattr(reply_msg, "chat_id") and reply_msg.chat_id: return reply_msg.chat_id
     elif hasattr(reply_msg, "peer_id"):
         pid = reply_msg.peer_id
-        if isinstance(pid, PeerUser):
-            return pid.user_id
-        elif isinstance(pid, PeerChannel):
-            return pid.channel_id
+        if isinstance(pid, PeerUser): return pid.user_id
+        elif isinstance(pid, PeerChannel): return pid.channel_id
     return event.chat_id
 
-# ------------------ WELCOME TOGGLE ------------------
 @client.on(events.NewMessage(pattern=r"^(/togglewelcome|🔇 Toggle Welcome)$"))
 @admin_only
 async def toggle_welcome(event):
@@ -690,7 +657,6 @@ async def toggle_welcome(event):
     set_setting("welcome_enabled", "1" if welcome_enabled else "0")
     await event.reply(f"🔊 Welcome sequence is now **{'ON' if welcome_enabled else 'OFF'}**.")
 
-# ------------------ BACKUP / RESTORE ------------------
 @client.on(events.NewMessage(pattern=r"^(/backup|📁 Backup)$"))
 @admin_only
 async def backup(event):
@@ -700,81 +666,61 @@ async def backup(event):
         "messages": {str(k): v for k, v in saved_messages.items()},
         "button_forwards": button_forwards,
         "welcome": welcome_enabled,
+        "auto_replies": auto_replies
     }
     file = "backup.json"
-    with open(file, "w") as f:
-        json.dump(data, f)
+    with open(file, "w") as f: json.dump(data, f)
     await client.send_file(event.chat_id, file, caption="📁 Full backup")
     os.remove(file)
 
 @client.on(events.NewMessage(pattern=r"^/restore"))
 @admin_only
 async def restore(event):
-    if not event.is_reply:
-        await event.reply("❌ Reply to a `.json` backup file.")
-        return
+    if not event.is_reply: return await event.reply("❌ Reply to a `.json` backup file.")
     rep = await event.get_reply_message()
-    if not rep.file or not rep.file.name.endswith(".json"):
-        await event.reply("❌ Invalid file.")
-        return
+    if not rep.file or not rep.file.name.endswith(".json"): return await event.reply("❌ Invalid file.")
     path = await client.download_media(rep.media)
     try:
-        with open(path, "r") as f:
-            data = json.load(f)
-        global tracked_users, blocked_users, saved_messages, button_forwards, welcome_enabled
+        with open(path, "r") as f: data = json.load(f)
+        global tracked_users, blocked_users, saved_messages, button_forwards, welcome_enabled, auto_replies
         tracked_users = {int(k): int(v) for k, v in data.get("tracked", {}).items()}
         blocked_users = set(int(u) for u in data.get("blocked", []))
         saved_messages = {int(k): v for k, v in data.get("messages", {}).items()}
         button_forwards = data.get("button_forwards", {})
         welcome_enabled = data.get("welcome", True)
+        auto_replies = data.get("auto_replies", {})
 
         with sqlite3.connect(str(DB_PATH)) as conn:
             conn.execute("DELETE FROM users")
             conn.execute("DELETE FROM messages")
             conn.execute("DELETE FROM button_msgs")
+            conn.execute("DELETE FROM auto_replies")
             
             for uid, hsh in tracked_users.items():
-                conn.execute("INSERT OR REPLACE INTO users (user_id, access_hash, blocked) VALUES (?,?,?)", 
-                             (uid, hsh, int(uid in blocked_users)))
+                conn.execute("INSERT OR REPLACE INTO users (user_id, access_hash, blocked) VALUES (?,?,?)", (uid, hsh, int(uid in blocked_users)))
             for step, d in saved_messages.items():
-                conn.execute("INSERT OR REPLACE INTO messages (step, msg_type, text, msg_id, from_chat) VALUES (?,?,?,?,?)",
-                             (step, d.get("type"), d.get("text"), d.get("msg_id"), d.get("from_chat")))
+                conn.execute("INSERT OR REPLACE INTO messages (step, msg_type, text, msg_id, from_chat) VALUES (?,?,?,?,?)", (step, d.get("type"), d.get("text"), d.get("msg_id"), d.get("from_chat")))
             for key, cfg_list in button_forwards.items():
-                if isinstance(cfg_list, dict): 
-                    cfg_list = [cfg_list]
-                    button_forwards[key] = cfg_list
-                for cfg in cfg_list:
-                    conn.execute("INSERT INTO button_msgs (btn_key, msg_id, from_chat) VALUES (?,?,?)",
-                                 (key, cfg["msg_id"], cfg["from_chat"]))
-                             
+                if isinstance(cfg_list, dict): cfg_list = [cfg_list]
+                for cfg in cfg_list: conn.execute("INSERT INTO button_msgs (btn_key, msg_id, from_chat) VALUES (?,?,?)", (key, cfg["msg_id"], cfg["from_chat"]))
+            for kw, resp in auto_replies.items():
+                conn.execute("INSERT OR REPLACE INTO auto_replies (keyword, response) VALUES (?,?)", (kw, resp))
+                
         set_setting("welcome_enabled", "1" if welcome_enabled else "0")
         await event.reply(f"✅ Restored: {len(tracked_users)} users")
     except Exception as e:
         await event.reply(f"❌ Restore failed: {e}")
     finally:
-        if os.path.exists(path):
-            os.remove(path)
+        if os.path.exists(path): os.remove(path)
 
-# ------------------ OTHER ADMIN BUTTON HELPERS ------------------
 @client.on(events.NewMessage(pattern=r"^(📢 Broadcast|🔢 Set Sequence|🔘 Set Button|🗑 Clear Button)$"))
 @admin_only
 async def helper_buttons(event):
     text = event.text
-    if text == "📢 Broadcast":
-        await event.reply("📢 **Broadcast Kaise Karein?**\n\n👉 `/broadcast <text>` ya reply with message.")
-    elif text == "🔢 Set Sequence":
-        await event.reply("🔢 **Sequence Kaise Set Karein?**\n\n👉 `/setmsg1 <text>` ya reply karein.")
-    elif text == "🔘 Set Button":
-        await event.reply(
-            "🔘 **Button Set Kaise Karein?**\n\n"
-            "👉 **Step 1:** `/setbutton hack` (reply karke pehla msg daalo)\n"
-            "👉 **Step 2 (Optional):** `/addbutton hack` (reply karke dusra msg add karo)"
-        )
-    elif text == "🗑 Clear Button":
-        await event.reply(
-            "🗑 **Button Clear Kaise Karein?**\n\n"
-            "👉 `/clearbutton hack` ya `/clearbutton prediction` se button config hataayein."
-        )
+    if text == "📢 Broadcast": await event.reply("📢 **Broadcast Kaise Karein?**\n\n👉 `/broadcast <text>` ya reply with message.")
+    elif text == "🔢 Set Sequence": await event.reply("🔢 **Sequence Kaise Set Karein?**\n\n👉 `/setmsg1 <text>` ya reply karein.")
+    elif text == "🔘 Set Button": await event.reply("🔘 **Button Set Kaise Karein?**\n👉 **Step 1:** `/setbutton hack` (reply karke pehla msg daalo)\n👉 **Step 2:** `/addbutton hack` (reply karke dusra msg add karo)")
+    elif text == "🗑 Clear Button": await event.reply("🗑 **Button Clear Kaise Karein?**\n👉 `/clearbutton hack` ya `/clearbutton prediction` se button config hataayein.")
 
 @client.on(events.NewMessage(pattern=r"^(📁 Backup|🔄 Restore)$"))
 @admin_only
@@ -784,47 +730,36 @@ async def backup_restore_buttons(event):
     elif event.text == "🔄 Restore":
         if os.path.exists("auto_backup.json"):
             try:
-                with open("auto_backup.json", "r") as f:
-                    data = json.load(f)
-                global tracked_users, blocked_users, saved_messages, button_forwards, welcome_enabled
+                with open("auto_backup.json", "r") as f: data = json.load(f)
+                global tracked_users, blocked_users, saved_messages, button_forwards, welcome_enabled, auto_replies
                 tracked_users = {int(k): int(v) for k, v in data.get("tracked", {}).items()}
                 blocked_users = set(int(u) for u in data.get("blocked", []))
                 saved_messages = {int(k): v for k, v in data.get("messages", {}).items()}
                 button_forwards = data.get("button_forwards", {})
                 welcome_enabled = data.get("welcome", True)
+                auto_replies = data.get("auto_replies", {})
                 
                 with sqlite3.connect(str(DB_PATH)) as conn:
                     conn.execute("DELETE FROM users")
                     conn.execute("DELETE FROM messages")
                     conn.execute("DELETE FROM button_msgs")
+                    conn.execute("DELETE FROM auto_replies")
                     
-                    for uid, hsh in tracked_users.items():
-                        conn.execute("INSERT OR REPLACE INTO users (user_id, access_hash, blocked) VALUES (?,?,?)", 
-                                     (uid, hsh, int(uid in blocked_users)))
-                    for step, d in saved_messages.items():
-                        conn.execute("INSERT OR REPLACE INTO messages (step, msg_type, text, msg_id, from_chat) VALUES (?,?,?,?,?)",
-                                     (step, d.get("type"), d.get("text"), d.get("msg_id"), d.get("from_chat")))
+                    for uid, hsh in tracked_users.items(): conn.execute("INSERT OR REPLACE INTO users (user_id, access_hash, blocked) VALUES (?,?,?)", (uid, hsh, int(uid in blocked_users)))
+                    for step, d in saved_messages.items(): conn.execute("INSERT OR REPLACE INTO messages (step, msg_type, text, msg_id, from_chat) VALUES (?,?,?,?,?)", (step, d.get("type"), d.get("text"), d.get("msg_id"), d.get("from_chat")))
                     for key, cfg_list in button_forwards.items():
-                        if isinstance(cfg_list, dict):
-                            cfg_list = [cfg_list]
-                            button_forwards[key] = cfg_list
-                        for cfg in cfg_list:
-                            conn.execute("INSERT INTO button_msgs (btn_key, msg_id, from_chat) VALUES (?,?,?)",
-                                         (key, cfg["msg_id"], cfg["from_chat"]))
-                                     
+                        if isinstance(cfg_list, dict): cfg_list = [cfg_list]
+                        for cfg in cfg_list: conn.execute("INSERT INTO button_msgs (btn_key, msg_id, from_chat) VALUES (?,?,?)", (key, cfg["msg_id"], cfg["from_chat"]))
+                    for kw, resp in auto_replies.items():
+                        conn.execute("INSERT OR REPLACE INTO auto_replies (keyword, response) VALUES (?,?)", (kw, resp))
+                        
                 set_setting("welcome_enabled", "1" if welcome_enabled else "0")
                 await event.reply(f"✅ Restored from auto‑backup. Users: {len(tracked_users)}")
             except Exception as e:
                 await event.reply(f"❌ Auto‑restore failed: {e}")
         else:
-            await event.reply(
-                "🔄 **Restore Kaise Karein?**\n\n"
-                "1. Pehle `/backup` se `.json` file banayein.\n"
-                "2. Us file par reply karke `/restore` command bhejein.\n\n"
-                "👉 Ya button dabayein toh automatic `auto_backup.json` restore hoga agar available ho."
-            )
+            await event.reply("🔄 **Restore Kaise Karein?**\n1. Pehle `/backup` se `.json` file banayein.\n2. Us file par reply karke `/restore` command bhejein.")
 
-# ------------------ CLEANUP ------------------
 @client.on(events.NewMessage(pattern=r"^(/cleanup|🧹 Cleanup)$"))
 @admin_only
 async def cleanup(event):
@@ -835,62 +770,71 @@ async def cleanup(event):
     blocked_users.clear()
     await event.reply("🧹 Blocked users removed from DB and memory.")
 
-# ------------------ TWO-WAY SEAMLESS CHAT (MODMAIL) ------------------
+# ------------------ TWO-WAY SEAMLESS CHAT & AUTO-REPLY ------------------
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
 async def seamless_chat_handler(event):
-    if event.sender_id in admin_chat_state:
-        return
+    if event.sender_id in admin_chat_state: return
 
     text = event.raw_text.lower() if event.raw_text else ""
     
+    # Ignore Commands
     if text.startswith('/') or "✉️ send message" in text or "📢 broadcast" in text or "📊 stats" in text or "⚙️ status" in text or "🔢 set sequence" in text or "🔇 toggle welcome" in text or "📁 backup" in text or "🔄 restore" in text or "🔘 set button" in text or "🗑 clear button" in text or "🧹 cleanup" in text:
         return
     if "number hack" in text or "colour trading" in text or "contact to admin" in text:
         return
 
     if event.sender_id not in ADMIN_IDS:
-        # --- USER BHEJ RAHA HAI ADMIN KO ---
+        # --- USER TO ADMIN ---
         if user_chat_state.get(event.sender_id):
+            
+            # 🔥 Check for Auto-Replies FIRST
+            bot_auto_replied = False
+            for kw, resp in auto_replies.items():
+                if kw in text:
+                    try:
+                        await client.send_message(event.sender_id, resp)
+                        bot_auto_replied = True
+                        break # Only trigger one keyword per message
+                    except Exception:
+                        pass
+
             user = await event.get_sender()
             name = user.first_name or "User"
             
+            # Tag the admin message if bot already answered it
+            auto_tag = "🤖 *(Bot Auto-Replied)*\n" if bot_auto_replied else ""
+            
             caption = (
                 f"💬 **NEW SUPPORT MESSAGE** 💬\n\n"
+                f"{auto_tag}"
                 f"👤 **From:** [{name}](tg://user?id={event.sender_id})\n"
                 f"🆔 `{event.sender_id}`\n"
             )
             
-            if event.raw_text:
-                caption += f"\n📝 **Message:**\n{event.raw_text}"
-                
+            if event.raw_text: caption += f"\n📝 **Message:**\n{event.raw_text}"
             caption += "\n\n👇 *(Reply to this message to answer)*"
                 
             for admin_id in ADMIN_IDS:
-                try:
-                    await client.send_message(admin_id, caption, file=event.media)
-                except Exception:
-                    pass
+                try: await client.send_message(admin_id, caption, file=event.media)
+                except Exception: pass
                     
             try:
-                feedback_msg = await event.reply("✅ *Message delivered to Admin.*")
-                await asyncio.sleep(3)
-                await feedback_msg.delete()
+                if not bot_auto_replied:
+                    feedback_msg = await event.reply("✅ *Message delivered to Admin.*")
+                    await asyncio.sleep(3)
+                    await feedback_msg.delete()
             except Exception:
                 pass
                 
         else:
-            try:
-                await event.delete()
-            except Exception:
-                pass
+            try: await event.delete()
+            except Exception: pass
             warning_msg = await event.respond("⚠️ **Direct messages are disabled.**\n👉 Please use the **'Contact to Admin'** button below to speak with us.")
             await asyncio.sleep(5)
-            try:
-                await warning_msg.delete()
-            except Exception:
-                pass
+            try: await warning_msg.delete()
+            except Exception: pass
     else:
-        # --- ADMIN REPLY KAR RAHA HAI USER KO ---
+        # --- ADMIN TO USER ---
         if event.is_reply:
             replied_msg = await event.get_reply_message()
             replied_text = replied_msg.raw_text or ""
@@ -900,29 +844,17 @@ async def seamless_chat_handler(event):
                 target_uid = int(match.group(1))
                 try:
                     access_hash = tracked_users.get(target_uid, 0)
-                    if access_hash:
-                        peer = InputPeerUser(target_uid, access_hash)
-                    else:
-                        peer = target_uid 
+                    peer = InputPeerUser(target_uid, access_hash) if access_hash else target_uid 
                         
-                    if event.raw_text:
-                        await client.send_message(peer, event.raw_text, file=event.media)
-                    elif event.media:
-                        await client.send_message(peer, file=event.media)
+                    if event.raw_text: await client.send_message(peer, event.raw_text, file=event.media)
+                    elif event.media: await client.send_message(peer, file=event.media)
                         
                     user_chat_state[target_uid] = True
-                    
                     admin_feedback = await event.reply("✅ **Sent!**")
                     await asyncio.sleep(2)
-                    try:
-                        await admin_feedback.delete()
-                    except Exception:
-                        pass
+                    try: await admin_feedback.delete()
+                    except Exception: pass
                         
-                except UserIsBlockedError:
-                    await event.reply("❌ **Failed:** Is user ne bot block kar diya hai.")
-                except PeerIdInvalidError:
-                    await event.reply("❌ **Failed:** Bot is user ko contact nahi kar paa raha.")
                 except Exception as e:
                     await event.reply(f"❌ **Error:** {e}")
 
@@ -937,13 +869,14 @@ async def periodic_backup():
                 "messages": {str(k): v for k, v in saved_messages.items()},
                 "button_forwards": button_forwards,
                 "welcome": welcome_enabled,
+                "auto_replies": auto_replies
             }
             with open("auto_backup.tmp", "w") as f:
                 json.dump(data, f)
             os.replace("auto_backup.tmp", "auto_backup.json")
             logger.info("Auto backup saved safely.")
         except Exception as e:
-            logger.error(f"Auto backup error: {e}")
+            pass
 
 # ------------------ MAIN ------------------
 async def main():
@@ -956,9 +889,6 @@ async def main():
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
-    try:
-        client.loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
+    try: client.loop.run_until_complete(main())
+    except KeyboardInterrupt: logger.info("Bot stopped.")
+    except Exception as e: logger.error(f"Fatal error: {e}")
