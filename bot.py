@@ -238,8 +238,6 @@ async def send_user_menu(entity):
             "🟢 **SYSTEM ONLINE** 🟢\n"
             "➖➖➖➖➖➖➖➖➖➖\n"
             "Welcome to the **Premium VIP Panel** ⚡️\n"
-            "Select an operation below to bypass server protocols and extract data.\n\n"
-            "🛡️ *Connection Secured. IP Masked.*"
         )
         await client.send_message(entity, welcome_msg, buttons=btns)
     except Exception:
