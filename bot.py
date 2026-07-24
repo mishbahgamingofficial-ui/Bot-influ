@@ -184,7 +184,7 @@ async def start_web():
 def admin_only(func):
     async def wrapper(event):
         if event.sender_id not in ADMIN_IDS:
-            await event.reply("❌ `[error] Permission denied. Root access required.`")
+            await event.reply("❌ `[Access Denied] Admin privileges required.`")
             return
         await func(event)
     return wrapper
@@ -200,26 +200,22 @@ async def notify_admins_new_user(user):
         safe_name = "Unknown User"
         
     linked_name = f"[{safe_name}](tg://user?id={user.id})"
-    
-    if user.username:
-        username_display = f"@{user.username}"
-    else:
-        username_display = f"❌ `[Null_Value]`"
+    username_display = f"@{user.username}" if user.username else "❌ `[No Username]`"
     
     text = (
-        f"🚨 **SYSTEM ALERT: NEW CONNECTION** 🚨\n"
+        f"🚨 **NEW USER CONNECTION** 🚨\n"
         f"➖➖➖➖➖➖➖➖➖➖➖➖\n"
-        f"👤 **Target:** {linked_name}\n"
+        f"👤 **Name:** {linked_name}\n"
         f"🔗 **Username:** {username_display}\n"
         f"🆔 **UID:** `{user.id}` *(Tap to copy)*\n\n"
-        f"💬 **Action:** Send `/send {user.id}` to intercept.\n"
+        f"💬 **Quick Action:** Reply or send `/send {user.id} <message>`\n"
         f"➖➖➖➖➖➖➖➖➖➖➖➖"
     )
     
     for admin_id in ADMIN_IDS:
         try:
             await client.send_message(admin_id, text)
-        except Exception as e:
+        except Exception:
             pass
 
 # ------------------ WELCOME SYSTEM & MENU ------------------
@@ -231,13 +227,14 @@ async def send_user_menu(entity):
     btns = [
         [Button.text("⚡️ I Want Number HACK", resize=True)],
         [Button.text("📊 How To Start COLOUR TRADING", resize=True)],
-        [Button.text("🎧 Contact Support (Admin)", resize=True)]
+        [Button.text("🎧 Contact Support", resize=True)]
     ]
     try:
         welcome_msg = (
-            "🟢 **SYSTEM ONLINE** 🟢\n"
+            "🟢 **SYSTEM ONLINE**\n"
             "➖➖➖➖➖➖➖➖➖➖\n"
-            "Welcome to the **Premium VIP Panel** ⚡️\n"
+            "Welcome to the **VIP Panel** ⚡️\n"
+            "Choose an option below to fetch instructions or connect with support."
         )
         await client.send_message(entity, welcome_msg, buttons=btns)
     except Exception:
@@ -257,12 +254,13 @@ async def send_welcome_sequence(user):
         if not isinstance(full_user, InputPeerUser):
             return
         access_hash = full_user.access_hash
-    except Exception as e:
+    except Exception:
         return
 
     is_new_user = uid not in tracked_users
-
     tracked_users[uid] = access_hash
+    
+    # 🌟 FIX: User ne bot start kiya hai matlab wo block list me nahi hona chahiye
     save_user(uid, access_hash, blocked=False)
     blocked_users.discard(uid)
 
@@ -286,16 +284,14 @@ async def send_welcome_sequence(user):
                 await client.send_message(full_user, item["text"])
             await asyncio.sleep(0.5)
         except UserIsBlockedError:
-            blocked_users.add(uid)
-            save_user(uid, access_hash, blocked=True)
-            return
-        except PeerIdInvalidError:
+            # 🌟 FIX: Sirf tabhi block list me dalo jab SACCHI ME UserIsBlockedError aaye
             blocked_users.add(uid)
             save_user(uid, access_hash, blocked=True)
             return
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds)
         except Exception:
+            # 🌟 FIX: PeerIdInvalidError ya koi dusra error aaye toh skip karo, block mat karo
             continue
             
     asyncio.create_task(remove_welcome_cooldown(uid))
@@ -319,11 +315,17 @@ async def join_request(event):
     except Exception:
         pass
 
-# ------------------ START (Keyboard for users & Admins) ------------------
+# ------------------ START COMMAND ------------------
 @client.on(events.NewMessage(pattern="(?i)^/start$"))
 async def start(event):
     user_chat_state[event.sender_id] = False 
     admin_chat_state.pop(event.sender_id, None)
+    
+    # 🌟 FIX: Agar user ne start kiya hai, aur galti se block list mein tha, toh waapas nikaalo
+    if event.sender_id in blocked_users:
+        blocked_users.discard(event.sender_id)
+        access_hash = tracked_users.get(event.sender_id, 0)
+        save_user(event.sender_id, access_hash, blocked=False)
     
     if event.sender_id in ADMIN_IDS:
         btns = [
@@ -334,21 +336,20 @@ async def start(event):
             [Button.text("🔘 Set Button"), Button.text("🗑 Clear Button")],
             [Button.text("🧹 Cleanup")]
         ]
-        admin_welcome = (
-            "👨‍💻 **ROOT ACCESS GRANTED** 👨‍💻\n"
+        admin_panel_text = (
+            "👨‍💻 **ADMIN CONTROL PANEL**\n"
             "➖➖➖➖➖➖➖➖➖➖➖➖\n"
-            "Welcome to the **Admin Control Center** ⚙️\n"
-            "Select an operation below to manage the bot's core systems:\n\n"
-            "*(To view Auto-Replies, send /listreplies)*"
+            "Select an operation below to manage your bot systems seamlessly.\n\n"
+            "💡 *Tip: To view active auto-replies, send `/listreplies`*"
         )
-        await event.reply(admin_welcome, buttons=btns)
+        await event.reply(admin_panel_text, buttons=btns)
     else:
         user = await event.get_sender()
         if user:
             await send_welcome_sequence(user)
             await send_user_menu(user)
 
-# ------------------ FOOLPROOF BUTTON HANDLERS & HACKER ANIMATION ------------------
+# ------------------ BUTTON HANDLERS & ANIMATIONS ------------------
 @client.on(events.NewMessage(func=lambda e: e.text and "number hack" in e.text.lower()))
 async def hack_button_handler(event):
     await send_button_forward(event, "hack")
@@ -363,44 +364,38 @@ async def contact_admin_handler(event):
         return
         
     user_chat_state[event.sender_id] = True
-    await event.reply("📝 **Admin Support Connection Open** 🟢\n\nAb aap apna message ya screenshot yahan bhej sakte hain. Seedha admin ko deliver ho jayega! 👇")
+    await event.reply("📝 **Support Session Active** 🟢\n\nAb aap apna message ya screenshot yahan bhej sakte hain. Seedha admin tak pahunch jayega! 👇")
 
 async def send_button_forward(event, key):
     uid = event.sender_id
     config_list = button_forwards.get(key)
     
     if not config_list:
-        await event.reply("⚠️ `[error] Directory not found. Contact Root Admin.`")
+        await event.reply("⚠️ `[Notice] This module is not configured yet. Please check back later.`")
         return
 
-    # 🔥 DUAL TERMINAL ANIMATION 🔥
     if key == "hack":
-        status_msg = await event.reply("🔌 `[sys] Initializing bypass sequence...`")
+        status_msg = await event.reply("🔌 `[sys] Initializing secure connection...`")
         await asyncio.sleep(0.5)
-        await status_msg.edit("🌐 `[sys] Masking IP & connecting to proxy net...`")
+        await status_msg.edit("🌐 `[sys] Bypassing security firewalls...`")
         await asyncio.sleep(0.5)
-        await status_msg.edit("🔐 `[auth] Brute-forcing VIP servers [██░░░░░░] 25%`")
+        await status_msg.edit("🔐 `[auth] Decrypting VIP package [████░░░░] 45%`")
         await asyncio.sleep(0.5)
-        await status_msg.edit("🔓 `[auth] Access token generated!  [██████░░] 75%`")
+        await status_msg.edit("📂 `[data] Extracting files [████████] 100%`")
         await asyncio.sleep(0.5)
-        await status_msg.edit("📂 `[data] Extracting hidden algorithm [████████] 100%`")
-        await asyncio.sleep(0.5)
-        await status_msg.edit("✅ **SUCCESS:** VIP Hack Data extracted. Sending files securely... 🚀")
+        await status_msg.edit("✅ **SUCCESS:** Package extracted securely. Sending now... 🚀")
         await asyncio.sleep(0.6)
-        
     elif key == "prediction":
-        status_msg = await event.reply("🤖 `[AI] Initializing pattern recognition engine...`")
+        status_msg = await event.reply("🤖 `[AI] Loading trading analysis engine...`")
         await asyncio.sleep(0.5)
-        await status_msg.edit("📊 `[AI] Analyzing past 10,000 market trends...`")
+        await status_msg.edit("📊 `[AI] Processing historical market stats...`")
         await asyncio.sleep(0.5)
-        await status_msg.edit("🔍 `[AI] Scanning for Sureshot signals [████░░░░] 50%`")
+        await status_msg.edit("🔍 `[AI] Finding high-accuracy trends [████████] 100%`")
         await asyncio.sleep(0.5)
-        await status_msg.edit("🧠 `[AI] Calculating probability matrix [████████] 100%`")
-        await asyncio.sleep(0.5)
-        await status_msg.edit("🎯 **SURESHOT FOUND!** Sending prediction details... 💸")
+        await status_msg.edit("🎯 **SIGNAL READY:** Forwarding prediction details... 💸")
         await asyncio.sleep(0.6)
     else:
-        status_msg = await event.reply("⏳ `[sys] Executing request...`")
+        status_msg = await event.reply("⏳ `[sys] Processing request...`")
 
     try:
         sent_count = 0
@@ -416,26 +411,28 @@ async def send_button_forward(event, key):
             await asyncio.sleep(0.3) 
             
         if sent_count == 0:
-            await status_msg.edit("❌ `[error] Data corrupted or deleted by Admin.`")
+            await status_msg.edit("❌ `[Error] Configured messages are unavailable or deleted.`")
         else:
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.0)
             await status_msg.delete() 
             
     except UserIsBlockedError:
-        await status_msg.edit("❌ You have blocked the bot. Please unblock and try again.")
+        # 🌟 FIX: User ne sach me block kiya toh list me daalo, par msg edit nahi kar sakte kyuki blocked hai.
+        blocked_users.add(uid)
+        save_user(uid, tracked_users.get(uid, 0), blocked=True)
     except FloodWaitError as e:
-        await status_msg.edit(f"⏳ `[sys] Rate limit exceeded. Wait {e.seconds}s.`")
+        await status_msg.edit(f"⏳ Rate limit exceeded. Please wait {e.seconds} seconds.")
     except Exception as e:
         logger.error(f"Button {key} error for {uid}: {e}")
-        await status_msg.edit("❌ `[sys] Fatal Error occurred.`")
+        await status_msg.edit("❌ An error occurred. Please try again later.")
 
 
-# ------------------ DIRECT MESSAGE (SMART BUTTON SYSTEM) ------------------
+# ------------------ ADMIN SMART SEND MESSAGE ------------------
 @client.on(events.NewMessage(pattern=r"^✉️ Send Message$"))
 @admin_only
 async def btn_send_dm_start(event):
     admin_id = event.sender_id
-    prompt = await event.reply("👤 **TARGET SELECTION**\n➖➖➖➖➖➖➖➖\n👉 Niche us user ki **UID** type karke bhejo:\n*(Cancel karne ke liye /cancel likho)*")
+    prompt = await event.reply("👤 **DIRECT MESSAGING**\n➖➖➖➖➖➖➖➖\n👉 Niche target user ki **UID** type karke bhejo:\n*(Cancel karne ke liye `/cancel` likhein)*")
     
     admin_chat_state[admin_id] = {
         "step": "waiting_for_id",
@@ -448,7 +445,7 @@ async def btn_send_dm_start(event):
 async def cancel_state(event):
     if event.sender_id in admin_chat_state:
         del admin_chat_state[event.sender_id]
-        await event.reply("🚫 `[sys] Action aborted.`")
+        await event.reply("🚫 `[Notice] Operation cancelled successfully.`")
 
 @client.on(events.NewMessage(func=lambda e: e.sender_id in ADMIN_IDS and e.sender_id in admin_chat_state))
 async def handle_admin_chat_state(event):
@@ -469,10 +466,10 @@ async def handle_admin_chat_state(event):
                 await client.delete_messages(admin_id, state["delete_msgs"])
             except Exception:
                 pass
-            prompt = await event.respond(f"✅ **Target Locked:** `{target_id}`\n➖➖➖➖➖➖➖➖\n✍️ **Ab apna Message, Photo ya Video bhejo:**\n*(Cancel karne ke liye /cancel likho)*")
+            prompt = await event.respond(f"✅ **Target UID Locked:** `{target_id}`\n➖➖➖➖➖➖➖➖\n✍️ **Ab apna Message, Photo ya Video bhejo:**\n*(Cancel karne ke liye `/cancel` likhein)*")
             state["delete_msgs"] = [prompt.id] 
         else:
-            await event.reply("❌ `[error] Invalid format.` Sirf numbers allow hain. Phir se UID type karo:")
+            await event.reply("❌ `[Error] Invalid format.` Sirf numbers allow hain. Phir se UID type karein:")
             
     elif state["step"] == "waiting_for_msg":
         target_id = state["target_id"]
@@ -490,10 +487,16 @@ async def handle_admin_chat_state(event):
                 await client.send_message(peer, file=event.media)
                 
             user_chat_state[target_id] = True 
-            await event.respond(f"✅ **Transmission Successful to `{target_id}`!**")
+            await event.respond(f"✅ **Message successfully delivered to `{target_id}`!**")
+            del admin_chat_state[admin_id]
+        except UserIsBlockedError:
+            # 🌟 FIX: SACCHI MEIN BLOCKED HAI
+            blocked_users.add(target_id)
+            save_user(target_id, tracked_users.get(target_id, 0), blocked=True)
+            await event.respond(f"❌ `[Error] Delivery Failed: User blocked the bot.`")
             del admin_chat_state[admin_id]
         except Exception as e:
-            await event.respond(f"❌ `[error] Delivery Failed:` {e}")
+            await event.respond(f"❌ `[Error] Delivery Failed:` System issue ya invalid ID.")
             del admin_chat_state[admin_id]
             
     raise events.StopPropagation 
@@ -511,11 +514,15 @@ async def send_dm_manual(event):
         elif text_msg:
             await client.send_message(peer, text_msg.strip())
         user_chat_state[target_uid] = True
-        await event.reply(f"✅ **Transmission Successful to `{target_uid}`!**")
+        await event.reply(f"✅ **Message successfully delivered to `{target_uid}`!**")
+    except UserIsBlockedError:
+        blocked_users.add(target_uid)
+        save_user(target_uid, tracked_users.get(target_uid, 0), blocked=True)
+        await event.reply(f"❌ `[Error] Delivery Failed: User blocked the bot.`")
     except Exception as e:
-        await event.reply(f"❌ `[error] Delivery Failed:` {e}")
+        await event.reply(f"❌ `[Error] Delivery Failed:` System issue ya invalid ID.")
 
-# 🔥 ------------------ AUTO-RESPONDER COMMANDS ------------------ 🔥
+# ------------------ AUTO-RESPONDER COMMANDS ------------------
 @client.on(events.NewMessage(pattern=r"^/setreply\s+(.+?)\s*\|\s*(.+)"))
 @admin_only
 async def set_auto_reply(event):
@@ -526,7 +533,7 @@ async def set_auto_reply(event):
     with sqlite3.connect(str(DB_PATH)) as conn:
         conn.execute("INSERT OR REPLACE INTO auto_replies (keyword, response) VALUES (?, ?)", (keyword, response))
         
-    await event.reply(f"✅ **Auto-Reply Configured!**\n➖➖➖➖➖➖➖➖\n🔑 **Trigger:** `{keyword}`\n🤖 **Response:**\n{response}")
+    await event.reply(f"✅ **Auto-Reply Saved!**\n➖➖➖➖➖➖➖➖\n🔑 **Keyword:** `{keyword}`\n🤖 **Response:**\n{response}")
 
 @client.on(events.NewMessage(pattern=r"^/delreply\s+(.+)"))
 @admin_only
@@ -536,40 +543,40 @@ async def del_auto_reply(event):
         del auto_replies[keyword]
         with sqlite3.connect(str(DB_PATH)) as conn:
             conn.execute("DELETE FROM auto_replies WHERE keyword=?", (keyword,))
-        await event.reply(f"🗑 **Rule deleted** for keyword: `{keyword}`")
+        await event.reply(f"🗑 **Auto-reply deleted** for keyword: `{keyword}`")
     else:
-        await event.reply(f"⚠️ `[error] Keyword '{keyword}' not found in database.`")
+        await event.reply(f"⚠️ Keyword `{keyword}` database mein nahi mila.")
 
 @client.on(events.NewMessage(pattern=r"^/listreplies$"))
 @admin_only
 async def list_auto_replies(event):
     if not auto_replies:
-        await event.reply("📭 Database empty. No auto-replies found.")
+        await event.reply("📭 Abhi koi auto-replies set nahi hain.")
         return
         
-    msg = "🤖 **ACTIVE AUTO-REPLIES** 🤖\n➖➖➖➖➖➖➖➖➖➖➖➖\n"
+    msg = "🤖 **ACTIVE AUTO-REPLIES:**\n➖➖➖➖➖➖➖➖➖➖➖➖\n"
     for kw, resp in auto_replies.items():
         short_resp = resp[:25] + "..." if len(resp) > 25 else resp
         msg += f"🔹 `{kw}` ➡ {short_resp}\n"
     await event.reply(msg)
 
-# ------------------ STATS / STATUS / BROADCAST / SETTINGS ------------------
+# ------------------ STATS / STATUS / BROADCAST ------------------
 @client.on(events.NewMessage(pattern=r"^(/stats|📊 Stats)$"))
 @admin_only
 async def stats(event):
     hack_msgs = len(button_forwards.get('hack', []))
     pred_msgs = len(button_forwards.get('prediction', []))
     msg = (
-        "🖥️ **SYSTEM RESOURCES & STATS** 🖥️\n"
+        "📊 **BOT STATISTICS & METRICS**\n"
         "➖➖➖➖➖➖➖➖➖➖➖➖\n"
-        f"👥 **Active Connections:** `{len(tracked_users)}`\n"
-        f"🚫 **Blocked / Dead:** `{len(blocked_users)}`\n"
-        f"🤖 **Auto-Reply Rules:** `{len(auto_replies)}`\n"
-        f"🔊 **Welcome Protocol:** `{'🟢 ON' if welcome_enabled else '🔴 OFF'}`\n\n"
-        f"📁 **DATABASE ARCHIVES:**\n"
-        f" ├ Sequence Setup: `{len(saved_messages)} steps`\n"
-        f" ├ Hack Button: `{hack_msgs} files`\n"
-        f" └ Prediction Button: `{pred_msgs} files`\n"
+        f"👥 **Active Users:** `{len(tracked_users)}`\n"
+        f"🚫 **Blocked Users:** `{len(blocked_users)}`\n"
+        f"🤖 **Auto-Replies:** `{len(auto_replies)}`\n"
+        f"🔊 **Welcome Status:** `{'🟢 ON' if welcome_enabled else '🔴 OFF'}`\n\n"
+        f"📁 **CONFIGURED BUTTONS:**\n"
+        f" ├ Sequence Steps: `{len(saved_messages)}`\n"
+        f" ├ Hack Files: `{hack_msgs}`\n"
+        f" └ Prediction Files: `{pred_msgs}`\n"
         "➖➖➖➖➖➖➖➖➖➖➖➖"
     )
     await event.reply(msg)
@@ -578,16 +585,16 @@ async def stats(event):
 @admin_only
 async def status(event):
     steps = "\n".join(f"  {s}: {d['type']}" for s, d in sorted(saved_messages.items()))
-    await event.reply(f"⚙️ **System Diagnostics**\nUsers: `{len(tracked_users)}`\nBlocked: `{len(blocked_users)}`\nSequence:\n{steps if steps else 'none'}")
+    await event.reply(f"⚙️ **System Status**\nUsers: `{len(tracked_users)}`\nBlocked: `{len(blocked_users)}`\nSequence:\n{steps if steps else 'none'}")
 
 @client.on(events.NewMessage(pattern=r"^/broadcast"))
 @admin_only
 async def broadcast(event):
-    if not tracked_users: return await event.reply("❌ Database empty.")
+    if not tracked_users: return await event.reply("❌ Koi active user nahi hai.")
     text = event.text.replace("/broadcast", "").strip()
-    if not text and not event.is_reply: return await event.reply("❌ `[error] Missing parameters. Supply text or reply.`")
+    if not text and not event.is_reply: return await event.reply("❌ Message text dein ya kisi message par reply karein.")
 
-    status_msg = await event.reply(f"📢 `[sys] Initiating mass broadcast to {len(tracked_users)} nodes...`")
+    status_msg = await event.reply(f"📢 Broadcasting to {len(tracked_users)} users...")
     success = fail = skip = 0
 
     for uid, old_hash in list(tracked_users.items()):
@@ -603,10 +610,16 @@ async def broadcast(event):
                 await client.send_message(peer, text)
             success += 1
             await asyncio.sleep(0.3)
+        except UserIsBlockedError:
+            # 🌟 FIX: Strict blocking in broadcast
+            blocked_users.add(uid)
+            save_user(uid, old_hash, blocked=True)
+            fail += 1
         except Exception:
+            # Baki errors ignore karo, block mat karo
             fail += 1
 
-    await status_msg.edit(f"✅ **BROADCAST COMPLETE**\n➖➖➖➖➖➖➖➖\n✅ Delivered: `{success}`\n❌ Failed: `{fail}`\n⏭ Skipped: `{skip}`")
+    await status_msg.edit(f"✅ **Broadcast Completed**\n➖➖➖➖➖➖➖➖\n✅ Delivered: `{success}`\n❌ Failed: `{fail}`\n⏭ Skipped: `{skip}`")
 
 @client.on(events.NewMessage(pattern=r"^/setmsg(\d+)(?:\s+(.+))?"))
 @admin_only
@@ -623,38 +636,38 @@ async def setmsg(event):
             del saved_messages[step]
             with sqlite3.connect(str(DB_PATH)) as conn:
                 conn.execute("DELETE FROM messages WHERE step=?", (step,))
-            return await event.reply(f"🗑 Sequence Step `{step}` removed.")
+            return await event.reply(f"🗑 Sequence step {step} hata diya gaya hai.")
         else:
-            return await event.reply("❌ `[error] No data provided.`")
+            return await event.reply("❌ Text provide karein ya kisi message par reply karein.")
 
     saved_messages[step] = data
     save_message_step(step, data)
-    await event.reply(f"✅ Sequence Step `{step}` configured as `{data['type']}`.")
+    await event.reply(f"✅ Sequence Step {step} save ho gaya hai.")
 
 @client.on(events.NewMessage(pattern=r"^/setbutton\s+(hack|prediction)$"))
 @admin_only
 async def set_button(event):
     btn_key = event.pattern_match.group(1).lower()
-    if not event.is_reply: return await event.reply("❌ `[error] Reply required.`")
+    if not event.is_reply: return await event.reply("❌ Please reply to the message you want to set for this button.")
     reply_msg = await event.get_reply_message()
     chat_id = get_chat_id(reply_msg, event)
     delete_button_config(btn_key)
     button_forwards[btn_key] = []
     add_button_config(btn_key, reply_msg.id, chat_id)
     button_forwards[btn_key].append({"msg_id": reply_msg.id, "from_chat": chat_id})
-    await event.reply(f"✅ Memory allocated for **'{btn_key}'**! (1 file)\n\n👉 **Tip:** Use `/addbutton {btn_key}` to stack more.")
+    await event.reply(f"✅ Button **'{btn_key}'** set ho gaya hai! (1 file)\n\n👉 **Tip:** `/addbutton {btn_key}` se aur files add kar sakte hain.")
 
 @client.on(events.NewMessage(pattern=r"^/addbutton\s+(hack|prediction)$"))
 @admin_only
 async def add_button(event):
     btn_key = event.pattern_match.group(1).lower()
-    if not event.is_reply: return await event.reply("❌ `[error] Reply required.`")
+    if not event.is_reply: return await event.reply("❌ Please reply to the message.")
     if btn_key not in button_forwards: button_forwards[btn_key] = []
     reply_msg = await event.get_reply_message()
     chat_id = get_chat_id(reply_msg, event)
     add_button_config(btn_key, reply_msg.id, chat_id)
     button_forwards[btn_key].append({"msg_id": reply_msg.id, "from_chat": chat_id})
-    await event.reply(f"✅ File stacked! Total payload: `{len(button_forwards[btn_key])}`")
+    await event.reply(f"✅ Additional file added! Total: `{len(button_forwards[btn_key])}`")
 
 @client.on(events.NewMessage(pattern=r"^/clearbutton\s+(hack|prediction)$"))
 @admin_only
@@ -663,9 +676,9 @@ async def clear_button(event):
     if btn_key in button_forwards:
         del button_forwards[btn_key]
         delete_button_config(btn_key)
-        await event.reply(f"🗑 Payload memory for **'{btn_key}'** wiped.")
+        await event.reply(f"🗑 Button **'{btn_key}'** clear kar diya gaya hai.")
     else:
-        await event.reply(f"⚠️ `[error] No data found in registry.`")
+        await event.reply(f"⚠️ Is button ki koi configuration nahi mili.")
 
 def get_chat_id(reply_msg, event):
     if hasattr(reply_msg, "chat_id") and reply_msg.chat_id: return reply_msg.chat_id
@@ -681,7 +694,7 @@ async def toggle_welcome(event):
     global welcome_enabled
     welcome_enabled = not welcome_enabled
     set_setting("welcome_enabled", "1" if welcome_enabled else "0")
-    await event.reply(f"🔊 Welcome Protocol is now **{'🟢 ON' if welcome_enabled else '🔴 OFF'}**.")
+    await event.reply(f"🔊 Welcome protocol is now **{'🟢 ON' if welcome_enabled else '🔴 OFF'}**.")
 
 @client.on(events.NewMessage(pattern=r"^(/backup|📁 Backup)$"))
 @admin_only
@@ -694,17 +707,17 @@ async def backup(event):
         "welcome": welcome_enabled,
         "auto_replies": auto_replies
     }
-    file = "sys_backup.json"
+    file = "backup.json"
     with open(file, "w") as f: json.dump(data, f)
-    await client.send_file(event.chat_id, file, caption="📁 `[sys] Encrypted Database Backup`")
+    await client.send_file(event.chat_id, file, caption="📁 `[System Backup File]`")
     os.remove(file)
 
 @client.on(events.NewMessage(pattern=r"^/restore"))
 @admin_only
 async def restore(event):
-    if not event.is_reply: return await event.reply("❌ `[error] Target a .json payload.`")
+    if not event.is_reply: return await event.reply("❌ Please reply to a `.json` backup file.")
     rep = await event.get_reply_message()
-    if not rep.file or not rep.file.name.endswith(".json"): return await event.reply("❌ `[error] Invalid file format.`")
+    if not rep.file or not rep.file.name.endswith(".json"): return await event.reply("❌ Invalid file format.")
     path = await client.download_media(rep.media)
     try:
         with open(path, "r") as f: data = json.load(f)
@@ -733,9 +746,9 @@ async def restore(event):
                 conn.execute("INSERT OR REPLACE INTO auto_replies (keyword, response) VALUES (?,?)", (kw, resp))
                 
         set_setting("welcome_enabled", "1" if welcome_enabled else "0")
-        await event.reply(f"✅ **RESTORE COMPLETE:** Memory loaded with `{len(tracked_users)}` targets.")
+        await event.reply(f"✅ **Restore Successful:** Loaded `{len(tracked_users)}` users.")
     except Exception as e:
-        await event.reply(f"❌ `[error] Data corruption detected during restore:` {e}")
+        await event.reply(f"❌ Restore failed: {e}")
     finally:
         if os.path.exists(path): os.remove(path)
 
@@ -743,10 +756,10 @@ async def restore(event):
 @admin_only
 async def helper_buttons(event):
     text = event.text
-    if text == "📢 Broadcast": await event.reply("📢 **Command Info:**\n👉 `/broadcast <text>` ya reply with message.")
-    elif text == "🔢 Set Sequence": await event.reply("🔢 **Command Info:**\n👉 `/setmsg1 <text>` ya reply karein.")
-    elif text == "🔘 Set Button": await event.reply("🔘 **Command Info:**\n👉 **Step 1:** `/setbutton hack` (reply karke pehla msg daalo)\n👉 **Step 2:** `/addbutton hack` (reply karke dusra msg add karo)")
-    elif text == "🗑 Clear Button": await event.reply("🗑 **Command Info:**\n👉 `/clearbutton hack` ya `/clearbutton prediction`")
+    if text == "📢 Broadcast": await event.reply("📢 **How to Broadcast:**\n👉 Send `/broadcast <text>` or reply to a message.")
+    elif text == "🔢 Set Sequence": await event.reply("🔢 **How to Set Sequence:**\n👉 Send `/setmsg1 <text>` or reply to a message.")
+    elif text == "🔘 Set Button": await event.reply("🔘 **How to Set Buttons:**\n👉 Step 1: `/setbutton hack` (reply to message)\n👉 Step 2: `/addbutton hack` (to stack more)")
+    elif text == "🗑 Clear Button": await event.reply("🗑 **How to Clear:**\n👉 Use `/clearbutton hack` or `/clearbutton prediction`.")
 
 @client.on(events.NewMessage(pattern=r"^(📁 Backup|🔄 Restore)$"))
 @admin_only
@@ -780,11 +793,11 @@ async def backup_restore_buttons(event):
                         conn.execute("INSERT OR REPLACE INTO auto_replies (keyword, response) VALUES (?,?)", (kw, resp))
                         
                 set_setting("welcome_enabled", "1" if welcome_enabled else "0")
-                await event.reply(f"✅ `[sys] Auto-backup restored successfully. Nodes active:` {len(tracked_users)}")
+                await event.reply(f"✅ Restored from auto-backup successfully. Active users: `{len(tracked_users)}`")
             except Exception as e:
-                await event.reply(f"❌ `[error] Auto-restore sequence failed:` {e}")
+                await event.reply(f"❌ Auto-restore failed: {e}")
         else:
-            await event.reply("🔄 **Restore Protocol:**\n1. Generate backup using `/backup`.\n2. Reply to the `.json` file with `/restore`.")
+            await event.reply("🔄 **Restore Guide:**\n1. Generate a backup using `/backup`.\n2. Reply to that `.json` file with `/restore`.")
 
 @client.on(events.NewMessage(pattern=r"^(/cleanup|🧹 Cleanup)$"))
 @admin_only
@@ -794,16 +807,15 @@ async def cleanup(event):
     for uid in list(blocked_users):
         tracked_users.pop(uid, None)
     blocked_users.clear()
-    await event.reply("🧹 `[sys] Database purged. Dead nodes removed.`")
+    await event.reply("🧹 Database cleaned. Dead blocked users removed.")
 
-# ------------------ TWO-WAY SEAMLESS CHAT & AUTO-REPLY ------------------
+# ------------------ TWO-WAY CHAT & AUTO-REPLY ------------------
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
 async def seamless_chat_handler(event):
     if event.sender_id in admin_chat_state: return
 
     text = event.raw_text.lower() if event.raw_text else ""
     
-    # Ignore Commands
     if text.startswith('/') or "✉️ send message" in text or "📢 broadcast" in text or "📊 stats" in text or "⚙️ status" in text or "🔢 set sequence" in text or "🔇 toggle welcome" in text or "📁 backup" in text or "🔄 restore" in text or "🔘 set button" in text or "🗑 clear button" in text or "🧹 cleanup" in text:
         return
     if "number hack" in text or "colour trading" in text or "contact support" in text:
@@ -825,19 +837,18 @@ async def seamless_chat_handler(event):
 
             user = await event.get_sender()
             name = user.first_name or "User"
-            
             auto_tag = "🤖 *(AI Auto-Responded)*\n" if bot_auto_replied else ""
             
             caption = (
                 f"💬 **SUPPORT INTERCEPT** 💬\n"
                 f"➖➖➖➖➖➖➖➖➖➖\n"
                 f"{auto_tag}"
-                f"👤 **Source:** [{name}](tg://user?id={event.sender_id})\n"
+                f"👤 **From:** [{name}](tg://user?id={event.sender_id})\n"
                 f"🆔 `{event.sender_id}`\n"
             )
             
-            if event.raw_text: caption += f"\n📝 **Payload:**\n{event.raw_text}"
-            caption += "\n\n👇 *(Reply to intercept)*"
+            if event.raw_text: caption += f"\n📝 **Message:**\n{event.raw_text}"
+            caption += "\n\n👇 *(Reply to this message to answer)*"
                 
             for admin_id in ADMIN_IDS:
                 try: await client.send_message(admin_id, caption, file=event.media)
@@ -845,7 +856,7 @@ async def seamless_chat_handler(event):
                     
             try:
                 if not bot_auto_replied:
-                    feedback_msg = await event.reply("✅ `[sys] Packet delivered to Admin terminal.`")
+                    feedback_msg = await event.reply("✅ *Message delivered to Admin.*")
                     await asyncio.sleep(3)
                     await feedback_msg.delete()
             except Exception:
@@ -854,7 +865,7 @@ async def seamless_chat_handler(event):
         else:
             try: await event.delete()
             except Exception: pass
-            warning_msg = await event.respond("⚠️ `[error] Comms locked.`\n👉 Use **'Contact Support'** button to initialize connection.")
+            warning_msg = await event.respond("⚠️ **Direct messages are disabled.**\n👉 Please use the **'Contact Support'** button below to chat with admin.")
             await asyncio.sleep(5)
             try: await warning_msg.delete()
             except Exception: pass
@@ -875,18 +886,23 @@ async def seamless_chat_handler(event):
                     elif event.media: await client.send_message(peer, file=event.media)
                         
                     user_chat_state[target_uid] = True
-                    admin_feedback = await event.reply("✅ `[sys] Transmitted.`")
+                    admin_feedback = await event.reply("✅ **Sent!**")
                     await asyncio.sleep(2)
                     try: await admin_feedback.delete()
                     except Exception: pass
                         
+                except UserIsBlockedError:
+                    # 🌟 FIX: User ne block kiya hai
+                    blocked_users.add(target_uid)
+                    save_user(target_uid, tracked_users.get(target_uid, 0), blocked=True)
+                    await event.reply(f"❌ `[Error] Transmission failed: User blocked the bot.`")
                 except Exception as e:
-                    await event.reply(f"❌ `[error] Transmission failed:` {e}")
+                    await event.reply(f"❌ **Error:** {e}")
 
-# ------------------ AUTO BACKUP ------------------
+# ------------------ AUTO BACKUP (EVERY 6 HOURS & SEND TO ADMINS) ------------------
 async def periodic_backup():
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(6 * 3600)  # Har 6 ghante mein run hoga
         try:
             data = {
                 "tracked": tracked_users,
@@ -896,12 +912,21 @@ async def periodic_backup():
                 "welcome": welcome_enabled,
                 "auto_replies": auto_replies
             }
-            with open("auto_backup.tmp", "w") as f:
+            file = "auto_backup.json"
+            with open(file, "w") as f:
                 json.dump(data, f)
-            os.replace("auto_backup.tmp", "auto_backup.json")
-            logger.info("Auto backup saved safely.")
+            
+            # Har 6 ghante baad backup file seedha saare Admins ko bhej do!
+            caption = f"📁 `[Automatic 6-Hour Database Backup]`\n📊 Total Active Users: `{len(tracked_users)}`"
+            for admin_id in ADMIN_IDS:
+                try:
+                    await client.send_file(admin_id, file, caption=caption)
+                except Exception as e:
+                    logger.error(f"Failed to send periodic backup to admin {admin_id}: {e}")
+                    
+            logger.info("Automatic 6-hour backup generated and sent to admins.")
         except Exception as e:
-            pass
+            logger.error(f"Periodic backup error: {e}")
 
 # ------------------ MAIN ------------------
 async def main():
@@ -910,10 +935,10 @@ async def main():
     load_from_db()
     await start_web()
     asyncio.create_task(periodic_backup())
-    logger.info("System Online. Awaiting commands...")
+    logger.info("Bot is running smoothly...")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
     try: client.loop.run_until_complete(main())
-    except KeyboardInterrupt: logger.info("System shutting down.")
+    except KeyboardInterrupt: logger.info("Bot stopped.")
     except Exception as e: logger.error(f"Fatal error: {e}")
