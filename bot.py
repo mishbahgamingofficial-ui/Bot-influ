@@ -65,6 +65,9 @@ user_chat_state: dict[int, bool] = {}
 admin_chat_state: dict[int, dict] = {}
 auto_replies: dict[str, str] = {}
 
+# 🔥 NAYA: Global delete track karne ke liye registry
+admin_msg_map: dict[tuple, list] = {} 
+
 def init_db():
     with sqlite3.connect(str(DB_PATH)) as conn:
         conn.executescript("""
@@ -260,7 +263,6 @@ async def send_welcome_sequence(user):
     is_new_user = uid not in tracked_users
     tracked_users[uid] = access_hash
     
-    # 🌟 FIX: User ne bot start kiya hai matlab wo block list me nahi hona chahiye
     save_user(uid, access_hash, blocked=False)
     blocked_users.discard(uid)
 
@@ -284,14 +286,12 @@ async def send_welcome_sequence(user):
                 await client.send_message(full_user, item["text"])
             await asyncio.sleep(0.5)
         except UserIsBlockedError:
-            # 🌟 FIX: Sirf tabhi block list me dalo jab SACCHI ME UserIsBlockedError aaye
             blocked_users.add(uid)
             save_user(uid, access_hash, blocked=True)
             return
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds)
         except Exception:
-            # 🌟 FIX: PeerIdInvalidError ya koi dusra error aaye toh skip karo, block mat karo
             continue
             
     asyncio.create_task(remove_welcome_cooldown(uid))
@@ -321,7 +321,6 @@ async def start(event):
     user_chat_state[event.sender_id] = False 
     admin_chat_state.pop(event.sender_id, None)
     
-    # 🌟 FIX: Agar user ne start kiya hai, aur galti se block list mein tha, toh waapas nikaalo
     if event.sender_id in blocked_users:
         blocked_users.discard(event.sender_id)
         access_hash = tracked_users.get(event.sender_id, 0)
@@ -417,7 +416,6 @@ async def send_button_forward(event, key):
             await status_msg.delete() 
             
     except UserIsBlockedError:
-        # 🌟 FIX: User ne sach me block kiya toh list me daalo, par msg edit nahi kar sakte kyuki blocked hai.
         blocked_users.add(uid)
         save_user(uid, tracked_users.get(uid, 0), blocked=True)
     except FloodWaitError as e:
@@ -426,6 +424,41 @@ async def send_button_forward(event, key):
         logger.error(f"Button {key} error for {uid}: {e}")
         await status_msg.edit("❌ An error occurred. Please try again later.")
 
+# 🔥 ------------------ GLOBAL DELETE COMMAND ------------------ 🔥
+@client.on(events.NewMessage(pattern=r"^/del$"))
+@admin_only
+async def global_delete(event):
+    if not event.is_reply:
+        return await event.reply("❌ `[Error] Please reply to the user's message with /del to wipe it.`")
+    
+    replied = await event.get_reply_message()
+    key = (event.chat_id, replied.id)
+    
+    if key in admin_msg_map:
+        target_msgs = admin_msg_map[key]
+        for adm_id, msg_id in target_msgs:
+            try:
+                await client.delete_messages(adm_id, [msg_id])
+            except Exception:
+                pass
+        
+        # Memory cleanup
+        for adm_id, msg_id in target_msgs:
+            admin_msg_map.pop((adm_id, msg_id), None)
+            
+        del_confirm = await event.respond("✅ `[sys] Message wiped globally from all Admin panels.`")
+        
+        # Cleanup admin chat
+        try: await event.delete() # admin ka /del wala message delete
+        except: pass
+        await asyncio.sleep(3)
+        try: await del_confirm.delete() # confirm message delete
+        except: pass
+    else:
+        warn = await event.reply("⚠️ `[Notice] Cannot wipe. Message not found in active global registry.`")
+        await asyncio.sleep(3)
+        try: await warn.delete()
+        except: pass
 
 # ------------------ ADMIN SMART SEND MESSAGE ------------------
 @client.on(events.NewMessage(pattern=r"^✉️ Send Message$"))
@@ -490,7 +523,6 @@ async def handle_admin_chat_state(event):
             await event.respond(f"✅ **Message successfully delivered to `{target_id}`!**")
             del admin_chat_state[admin_id]
         except UserIsBlockedError:
-            # 🌟 FIX: SACCHI MEIN BLOCKED HAI
             blocked_users.add(target_id)
             save_user(target_id, tracked_users.get(target_id, 0), blocked=True)
             await event.respond(f"❌ `[Error] Delivery Failed: User blocked the bot.`")
@@ -611,12 +643,10 @@ async def broadcast(event):
             success += 1
             await asyncio.sleep(0.3)
         except UserIsBlockedError:
-            # 🌟 FIX: Strict blocking in broadcast
             blocked_users.add(uid)
             save_user(uid, old_hash, blocked=True)
             fail += 1
         except Exception:
-            # Baki errors ignore karo, block mat karo
             fail += 1
 
     await status_msg.edit(f"✅ **Broadcast Completed**\n➖➖➖➖➖➖➖➖\n✅ Delivered: `{success}`\n❌ Failed: `{fail}`\n⏭ Skipped: `{skip}`")
@@ -848,11 +878,21 @@ async def seamless_chat_handler(event):
             )
             
             if event.raw_text: caption += f"\n📝 **Message:**\n{event.raw_text}"
-            caption += "\n\n👇 *(Reply to this message to answer)*"
-                
+            caption += "\n\n👇 *(Reply or use /del to wipe this)*"
+            
+            # 🔥 NAYA: Msg track karne ke liye list
+            sent_admin_msgs = []
             for admin_id in ADMIN_IDS:
-                try: await client.send_message(admin_id, caption, file=event.media)
-                except Exception: pass
+                try: 
+                    sent_msg = await client.send_message(admin_id, caption, file=event.media)
+                    sent_admin_msgs.append((admin_id, sent_msg.id))
+                except Exception: 
+                    pass
+            
+            # 🔥 NAYA: Registry me save karna taaki globally delete ho sake
+            if sent_admin_msgs:
+                for adm_id, msg_id in sent_admin_msgs:
+                    admin_msg_map[(adm_id, msg_id)] = sent_admin_msgs
                     
             try:
                 if not bot_auto_replied:
@@ -892,7 +932,6 @@ async def seamless_chat_handler(event):
                     except Exception: pass
                         
                 except UserIsBlockedError:
-                    # 🌟 FIX: User ne block kiya hai
                     blocked_users.add(target_uid)
                     save_user(target_uid, tracked_users.get(target_uid, 0), blocked=True)
                     await event.reply(f"❌ `[Error] Transmission failed: User blocked the bot.`")
@@ -916,7 +955,6 @@ async def periodic_backup():
             with open(file, "w") as f:
                 json.dump(data, f)
             
-            # Har 6 ghante baad backup file seedha saare Admins ko bhej do!
             caption = f"📁 `[Automatic 6-Hour Database Backup]`\n📊 Total Active Users: `{len(tracked_users)}`"
             for admin_id in ADMIN_IDS:
                 try:
