@@ -234,10 +234,6 @@ async def send_user_menu(entity):
     ]
     try:
         welcome_msg = (
-            "🟢 **SYSTEM ONLINE**\n"
-            "➖➖➖➖➖➖➖➖➖➖\n"
-            "Welcome to the **VIP Panel** ⚡️\n"
-            "Choose an option below to fetch instructions or connect with support."
         )
         await client.send_message(entity, welcome_msg, buttons=btns)
     except Exception:
