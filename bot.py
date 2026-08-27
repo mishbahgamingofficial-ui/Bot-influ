@@ -233,11 +233,11 @@ async def send_user_menu(entity):
         [Button.text("🎧 Contact Support", resize=True)]
     ]
     try:
-        welcome_msg = (
-        )
-        await client.send_message(entity, welcome_msg, buttons=btns)
-    except Exception:
-        pass
+        invisible_text = "‎"  # Invisible character
+        await client.send_message(entity, invisible_text, buttons=btns)
+    except Exception as e:
+        logger.error(f"Menu error: {e}")
+
 
 async def send_welcome_sequence(user):
     uid = user.id
