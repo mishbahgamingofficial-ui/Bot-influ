@@ -233,9 +233,12 @@ async def send_user_menu(entity):
         [Button.text("🎧 Contact Support", resize=True)]
     ]
     try:
-        # Telegram-safe 100% working invisible character
-        invisible_text = "\u3164"  
-        await client.send_message(entity, invisible_text, buttons=btns)
+        # Telegram khali message reject karta hai, isliye sirf ek emoji best hai
+        safe_text = "👇"  
+        
+        # (Agar tujhe emoji bhi nahi chahiye, toh safe_text = "⠀" try karna, ye Braille space hai)
+        
+        await client.send_message(entity, safe_text, buttons=btns)
     except Exception as e:
         logger.error(f"Menu error: {e}")
 
