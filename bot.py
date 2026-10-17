@@ -27,6 +27,10 @@ from telethon.errors import (
     ChatInvalidError,
     ChannelInvalidError,
     MessageIdInvalidError,
+    UserDeactivatedError,
+    UserDeactivatedBanError,
+    InputUserDeactivatedError,
+    ChatWriteForbiddenError,
 )
 
 # ------------------ ENVIRONMENT ------------------
@@ -69,6 +73,7 @@ button_forwards: dict[str, list] = {}
 welcome_enabled = True
 animations_enabled = True
 broadcast_cancel_flag = False
+broadcast_running = False
 
 # Default "👇" रखा है जैसा तेरे इस कोड में था (Admin Panel से बदल भी सकते हो)
 user_menu_text = "👇"
@@ -93,6 +98,11 @@ ADMIN_KB_LABELS = {
 CANCEL_BTN = [[Button.inline("❌ Cancel Operation", data=b"adm_cancel")]]
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
+def get_db_conn():
+    conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    return conn
+
 def get_uptime():
     seconds = int(time.time() - START_TIME)
     days, seconds = divmod(seconds, 86400)
@@ -107,7 +117,10 @@ def get_uptime():
 def format_eta(seconds: float) -> str:
     if seconds <= 0 or seconds > 86400:
         return "Calculating..."
-    m, s = divmod(int(seconds), 60)
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}h {m}m {s}s"
     if m > 0:
         return f"{m}m {s}s"
     return f"{s}s"
@@ -134,7 +147,7 @@ async def play_animation(event_or_msg, frames: list[tuple[str, float]], is_edit:
     return msg
 
 def init_db():
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with get_db_conn() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -175,7 +188,7 @@ def load_from_db():
     global tracked_users, blocked_users, banned_users, user_join_dates, saved_messages, button_forwards
     global welcome_enabled, animations_enabled, user_menu_text, support_username, force_channel, banner_config, click_stats, auto_replies, ADMIN_IDS
     
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with get_db_conn() as conn:
         cur = conn.cursor()
         
         cur.execute("SELECT user_id FROM admins")
@@ -236,32 +249,35 @@ def load_from_db():
 def save_user(uid: int, access_hash: int, blocked: bool = False):
     jdate = user_join_dates.get(uid) or datetime.now().strftime("%Y-%m-%d")
     user_join_dates[uid] = jdate
-    with sqlite3.connect(str(DB_PATH)) as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO users (user_id, access_hash, blocked, joined_date) VALUES (?,?,?,?)",
-            (uid, access_hash, int(blocked), jdate),
-        )
+    try:
+        with get_db_conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO users (user_id, access_hash, blocked, joined_date) VALUES (?,?,?,?)",
+                (uid, access_hash, int(blocked), jdate),
+            )
+    except Exception as e:
+        logger.warning(f"DB save_user warning for {uid}: {e}")
 
 def save_message_step(step: int, data: dict):
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with get_db_conn() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO messages (step, msg_type, text, msg_id, from_chat) VALUES (?,?,?,?,?)",
             (step, data.get("type"), data.get("text"), data.get("msg_id"), data.get("from_chat")),
         )
 
 def add_button_config(key: str, msg_id: int, from_chat: int):
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with get_db_conn() as conn:
         conn.execute(
             "INSERT INTO button_msgs (btn_key, msg_id, from_chat) VALUES (?,?,?)",
             (key, msg_id, from_chat),
         )
 
 def delete_button_config(key: str):
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with get_db_conn() as conn:
         conn.execute("DELETE FROM button_msgs WHERE btn_key=?", (key,))
 
 def set_setting(key: str, value: str):
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with get_db_conn() as conn:
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value))
 
 def increment_click(key: str):
@@ -280,12 +296,27 @@ def get_chat_id(reply_msg, event):
             return pid.channel_id
     return event.chat_id
 
+async def resolve_user_peer(uid: int, access_hash: int = 0):
+    """Safely resolves user peer using stored access_hash first so broadcasts never stall on uncached users."""
+    if access_hash and access_hash != 0:
+        return InputPeerUser(uid, access_hash)
+    try:
+        ent = await asyncio.wait_for(client.get_input_entity(uid), timeout=8.0)
+        if isinstance(ent, InputPeerUser) and ent.access_hash:
+            tracked_users[uid] = ent.access_hash
+        return ent
+    except Exception:
+        return uid
+
 # ------------------ CLIENT ------------------
 client = TelegramClient(
     StringSession(SESSION_STRING) if SESSION_STRING else "bot_session",
     API_ID,
     API_HASH,
 )
+# Prevent Telethon from silently sleeping inside status_msg.edit and freezing the loop;
+# we handle FloodWaitError explicitly in our broadcast engine.
+client.flood_sleep_threshold = 0
 
 # ------------------ WEB SERVER ------------------
 async def web_handler(request):
@@ -464,7 +495,7 @@ async def send_welcome_sequence(user):
             else:
                 await client.send_message(full_user, item["text"])
             await asyncio.sleep(0.5)
-        except UserIsBlockedError:
+        except (UserIsBlockedError, UserDeactivatedError, UserDeactivatedBanError, InputUserDeactivatedError):
             blocked_users.add(uid)
             save_user(uid, access_hash, blocked=True)
             return
@@ -633,7 +664,7 @@ async def send_button_forward(event, key, is_callback: bool = False):
             await asyncio.sleep(0.8)
             await status_msg.delete() 
             
-    except UserIsBlockedError:
+    except (UserIsBlockedError, UserDeactivatedError, UserDeactivatedBanError, InputUserDeactivatedError):
         blocked_users.add(uid)
         save_user(uid, tracked_users.get(uid, 0), blocked=True)
     except FloodWaitError as e:
@@ -727,7 +758,7 @@ async def cleanup_btn(event):
     ]
     c_msg = await play_animation(event, clean_frames)
     
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with get_db_conn() as conn:
         conn.execute("DELETE FROM users WHERE blocked=1")
     removed = len(blocked_users)
     for uid in list(blocked_users):
@@ -802,7 +833,7 @@ async def broadcast_menu_btn(event):
         "➖➖➖➖➖➖➖➖➖➖➖➖\n"
         f"👥 **Total Database:** `{len(tracked_users)}` users\n"
         f"🟢 **Reachable Targets:** `{active_targets}` users\n"
-        f"⚡ **Live Update Rate:** `Every 3 Users`\n\n"
+        f"⚡ **Live Update Rate:** `Every 1 User (1s)`\n\n"
         "👇 *Select broadcast mode below:*",
         buttons=btns
     )
@@ -1056,7 +1087,7 @@ async def admin_callback_router(event):
         if target_uid in ADMIN_IDS:
             return await event.answer("❌ Cannot ban an Admin!", alert=True)
         banned_users.add(target_uid)
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with get_db_conn() as conn:
             conn.execute("INSERT OR IGNORE INTO banned (user_id) VALUES (?)", (target_uid,))
         await event.answer(f"🚫 User {target_uid} Banned!", alert=True)
         await event.respond(f"🚫 **User `{target_uid}` has been BANNED.**")
@@ -1082,6 +1113,8 @@ async def admin_callback_router(event):
         return
 
     if data in ("adm_bc_normal", "adm_bc_pin"):
+        if broadcast_running:
+            return await event.answer("⚠️ Ek broadcast pehle se chal raha hai! Pehle use rokein ya pura hone dein.", alert=True)
         should_pin = (data == "adm_bc_pin")
         mode_str = "📌 Broadcast + Auto-Pin" if should_pin else "📨 Normal Broadcast"
         await event.answer()
@@ -1133,14 +1166,14 @@ async def admin_callback_router(event):
         target = data.split("_")[-1]
         if target == "all":
             saved_messages.clear()
-            with sqlite3.connect(str(DB_PATH)) as conn:
+            with get_db_conn() as conn:
                 conn.execute("DELETE FROM messages")
             await event.answer("🗑 All sequence steps cleared!", alert=True)
             await event.edit("🗑 **All Welcome Sequence steps have been wiped!**")
         else:
             step_num = int(target)
             saved_messages.pop(step_num, None)
-            with sqlite3.connect(str(DB_PATH)) as conn:
+            with get_db_conn() as conn:
                 conn.execute("DELETE FROM messages WHERE step=?", (step_num,))
             await event.answer(f"🗑 Step {step_num} deleted!", alert=True)
             await event.edit(f"🗑 **Welcome Sequence Step {step_num} removed!**")
@@ -1250,7 +1283,7 @@ async def admin_callback_router(event):
     if data.startswith("adm_ardelkw_"):
         kw = data.replace("adm_ardelkw_", "", 1)
         auto_replies.pop(kw, None)
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with get_db_conn() as conn:
             conn.execute("DELETE FROM auto_replies WHERE keyword=?", (kw,))
         await event.answer(f"🗑 Deleted: {kw}", alert=True)
         await event.edit(f"🗑 **Auto-Reply for `{kw}` deleted successfully!**")
@@ -1283,7 +1316,7 @@ async def admin_callback_router(event):
             return await event.answer("❌ Cannot remove Root Admin!", alert=True)
         if target_aid in ADMIN_IDS:
             ADMIN_IDS.remove(target_aid)
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with get_db_conn() as conn:
             conn.execute("DELETE FROM admins WHERE user_id=?", (target_aid,))
         await event.answer("🗑 Admin Removed!", alert=True)
         await event.edit(f"🗑 **Admin `{target_aid}` removed successfully!**")
@@ -1322,7 +1355,7 @@ async def admin_callback_router(event):
     if data.startswith("adm_secunbanid_"):
         target_uid = int(data.split("_")[-1])
         banned_users.discard(target_uid)
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with get_db_conn() as conn:
             conn.execute("DELETE FROM banned WHERE user_id=?", (target_uid,))
         admin_chat_state.pop(admin_id, None)
         await event.answer(f"✅ Unbanned {target_uid}!", alert=True)
@@ -1352,15 +1385,64 @@ async def admin_callback_router(event):
         return
 
 # =====================================================================
-# 🚀 BROADCAST ENGINE 2.0 (EVERY 3 USERS UPDATE + ETA + STOP BUTTON)
+# 🚀 BROADCAST ENGINE 2.0 (1 SEC / 1 MEMBER LIVE UPDATE + ANTI-STALL)
 # =====================================================================
+async def _deliver_to_single_user(peer, event, should_pin: bool, manual_text: str = None, reply_msg_obj = None):
+    """Sends/forwards the broadcast message to a single peer with automatic FloodWait retry."""
+    for attempt in range(3):
+        try:
+            if reply_msg_obj:
+                sent = await asyncio.wait_for(
+                    client.forward_messages(peer, reply_msg_obj.id, reply_msg_obj.chat_id),
+                    timeout=20.0
+                )
+            elif manual_text is not None:
+                sent = await asyncio.wait_for(
+                    client.send_message(peer, manual_text),
+                    timeout=20.0
+                )
+            elif event.fwd_from:
+                sent = await asyncio.wait_for(
+                    client.forward_messages(peer, event.id, event.chat_id),
+                    timeout=20.0
+                )
+            else:
+                sent = await asyncio.wait_for(
+                    client.send_message(peer, event.text or "", file=event.media),
+                    timeout=25.0
+                )
+
+            if should_pin and sent:
+                try:
+                    msg_to_pin = sent[0].id if isinstance(sent, list) else sent.id
+                    await asyncio.wait_for(
+                        client.pin_message(peer, msg_to_pin, notify=True),
+                        timeout=10.0
+                    )
+                except Exception:
+                    pass
+            return True
+        except FloodWaitError as e:
+            wait_sec = min(int(e.seconds) + 1, 120)
+            logger.warning(f"Broadcast send FloodWait {e.seconds}s (attempt {attempt + 1}/3)")
+            await asyncio.sleep(wait_sec)
+        except asyncio.TimeoutError:
+            if attempt == 2:
+                raise
+            await asyncio.sleep(1.0)
+    return False
+
 async def execute_broadcast(event, should_pin: bool, manual_text: str = None, reply_msg_obj = None):
-    global broadcast_cancel_flag
+    global broadcast_cancel_flag, broadcast_running
     if not tracked_users:
         return await event.reply("❌ Koi active user nahi hai.")
-        
+    if broadcast_running:
+        return await event.reply("⚠️ Ek broadcast pehle se chal raha hai!")
+
+    broadcast_running = True
     broadcast_cancel_flag = False
-    total_targets = len(tracked_users)
+    user_snapshot = list(tracked_users.items())
+    total_targets = len(user_snapshot)
     stop_btn = [[Button.inline("🛑 Stop Broadcast", data=b"adm_bc_stop")]]
     
     launch_frames = [
@@ -1373,82 +1455,146 @@ async def execute_broadcast(event, should_pin: bool, manual_text: str = None, re
     processed = 0
     bc_start_time = time.time()
     spin_idx = 0
+    edit_cooldown_until = 0.0
+    newly_blocked_batch: list[tuple[int, int]] = []
 
-    for uid, old_hash in list(tracked_users.items()):
-        if broadcast_cancel_flag:
-            break
-            
-        processed += 1
-        if uid in blocked_users:
-            skip += 1
-        else:
-            try:
-                peer = await client.get_input_entity(uid)
-                if reply_msg_obj:
-                    sent = await client.forward_messages(peer, reply_msg_obj.id, reply_msg_obj.chat_id)
-                elif manual_text is not None:
-                    sent = await client.send_message(peer, manual_text)
-                elif event.fwd_from:
-                    sent = await client.forward_messages(peer, event.id, event.chat_id)
-                else:
-                    sent = await client.send_message(peer, event.text or "", file=event.media)
-                    
-                if should_pin and sent:
+    try:
+        for uid, old_hash in user_snapshot:
+            if broadcast_cancel_flag:
+                break
+                
+            step_start = time.time()
+            processed += 1
+
+            if uid in blocked_users or uid in banned_users:
+                skip += 1
+            else:
+                try:
+                    peer = await resolve_user_peer(uid, old_hash)
+                    delivered = await _deliver_to_single_user(
+                        peer, event, should_pin, manual_text=manual_text, reply_msg_obj=reply_msg_obj
+                    )
+                    if delivered:
+                        success += 1
+                    else:
+                        fail += 1
+                except (
+                    UserIsBlockedError,
+                    UserDeactivatedError,
+                    UserDeactivatedBanError,
+                    InputUserDeactivatedError,
+                    ChatWriteForbiddenError,
+                ):
+                    blocked_users.add(uid)
+                    newly_blocked_batch.append((uid, old_hash))
+                    fail += 1
+                except PeerIdInvalidError:
+                    # Fallback if stored access_hash was stale/0
                     try:
-                        msg_to_pin = sent[0].id if isinstance(sent, list) else sent.id
-                        await client.pin_message(peer, msg_to_pin, notify=True)
+                        ent = await asyncio.wait_for(client.get_input_entity(uid), timeout=8.0)
+                        delivered = await _deliver_to_single_user(
+                            ent, event, should_pin, manual_text=manual_text, reply_msg_obj=reply_msg_obj
+                        )
+                        if delivered:
+                            success += 1
+                        else:
+                            fail += 1
                     except Exception:
-                        pass
-                        
-                success += 1
-                await asyncio.sleep(0.25)
-            except FloodWaitError as e:
-                await asyncio.sleep(e.seconds)
-            except UserIsBlockedError:
-                blocked_users.add(uid)
-                save_user(uid, old_hash, blocked=True)
-                fail += 1
-            except Exception:
-                fail += 1
+                        fail += 1
+                except Exception as e:
+                    logger.debug(f"Broadcast fail for {uid}: {e}")
+                    fail += 1
 
-        # 🔥 UPDATE EVERY 3 USERS (OR FINAL USER)
-        if processed % 3 == 0 or processed == total_targets:
-            pct = int((processed / total_targets) * 100)
-            filled = pct // 10
-            bar = "█" * filled + "░" * (10 - filled)
-            spinner = SPINNER_FRAMES[spin_idx % len(SPINNER_FRAMES)]
-            spin_idx += 1
-            
-            elapsed = max(time.time() - bc_start_time, 0.1)
-            speed = processed / elapsed
-            remaining_users = total_targets - processed
-            eta_str = format_eta(remaining_users / speed) if speed > 0 else "..."
-            
+            # Flush newly blocked users in batches so SQLite never locks up the loop
+            if len(newly_blocked_batch) >= 25:
+                try:
+                    with get_db_conn() as conn:
+                        for b_uid, b_hash in newly_blocked_batch:
+                            jdate = user_join_dates.get(b_uid) or datetime.now().strftime("%Y-%m-%d")
+                            conn.execute(
+                                "INSERT OR REPLACE INTO users (user_id, access_hash, blocked, joined_date) VALUES (?,?,1,?)",
+                                (b_uid, b_hash, jdate),
+                            )
+                    newly_blocked_batch.clear()
+                except Exception:
+                    pass
+
+            # 🔥 UPDATE EVERY 1 USER / 1 SECOND (NON-BLOCKING SO IT NEVER STALLS AT 1000-2000 USERS)
+            now = time.time()
+            if now >= edit_cooldown_until or processed == total_targets:
+                pct = int((processed / total_targets) * 100)
+                filled = pct // 10
+                bar = "█" * filled + "░" * (10 - filled)
+                spinner = SPINNER_FRAMES[spin_idx % len(SPINNER_FRAMES)]
+                spin_idx += 1
+                
+                elapsed = max(now - bc_start_time, 0.1)
+                speed = processed / elapsed
+                remaining_users = total_targets - processed
+                eta_str = format_eta(remaining_users / speed) if speed > 0 else "..."
+                
+                try:
+                    await asyncio.wait_for(
+                        status_msg.edit(
+                            f"{spinner} **LIVE VIP BROADCASTING...** `[{bar}] {pct}%`\n"
+                            f"➖➖➖➖➖➖➖➖➖➖➖➖\n"
+                            f"🔄 **Processed:** `{processed} / {total_targets}` *(1s / 1 Member)*\n"
+                            f"✅ **Delivered:** `{success}` | ❌ **Failed:** `{fail}` | ⏭ **Skipped:** `{skip}`\n"
+                            f"⚡ **Speed:** `{speed:.1f} users/s` | ⏳ **ETA:** `{eta_str}`",
+                            buttons=stop_btn
+                        ),
+                        timeout=5.0
+                    )
+                except FloodWaitError as edit_fw:
+                    # If Telegram rate-limits message editing, keep broadcasting without pausing!
+                    edit_cooldown_until = time.time() + min(int(edit_fw.seconds), 30)
+                except Exception:
+                    pass
+
+            # Pace at 1 second per member (accounting for time already spent sending/editing)
+            if uid not in blocked_users and not broadcast_cancel_flag:
+                step_elapsed = time.time() - step_start
+                remaining_sleep = max(0.05, 1.0 - step_elapsed)
+                await asyncio.sleep(remaining_sleep)
+
+        # Flush any remaining blocked users to DB
+        if newly_blocked_batch:
             try:
-                await status_msg.edit(
-                    f"{spinner} **LIVE VIP BROADCASTING...** `[{bar}] {pct}%`\n"
-                    f"➖➖➖➖➖➖➖➖➖➖➖➖\n"
-                    f"🔄 **Processed:** `{processed} / {total_targets}`\n"
-                    f"✅ **Delivered:** `{success}` | ❌ **Failed:** `{fail}` | ⏭ **Skipped:** `{skip}`\n"
-                    f"⚡ **Speed:** `{speed:.1f} users/s` | ⏳ **ETA:** `{eta_str}`",
-                    buttons=stop_btn
-                )
+                with get_db_conn() as conn:
+                    for b_uid, b_hash in newly_blocked_batch:
+                        jdate = user_join_dates.get(b_uid) or datetime.now().strftime("%Y-%m-%d")
+                        conn.execute(
+                            "INSERT OR REPLACE INTO users (user_id, access_hash, blocked, joined_date) VALUES (?,?,1,?)",
+                            (b_uid, b_hash, jdate),
+                        )
+                newly_blocked_batch.clear()
             except Exception:
                 pass
 
-    total_time = format_eta(time.time() - bc_start_time)
-    header_title = "🛑 **BROADCAST ABORTED BY ADMIN**" if broadcast_cancel_flag else "✅ **VIP BROADCAST COMPLETED!**"
-    await status_msg.edit(
-        f"{header_title}\n"
-        f"➖➖➖➖➖➖➖➖➖➖➖➖\n"
-        f"👥 **Processed:** `{processed} / {total_targets}`\n"
-        f"✅ **Delivered:** `{success}`\n"
-        f"❌ **Failed/Blocked:** `{fail}`\n"
-        f"⏭ **Skipped:** `{skip}`\n"
-        f"⏱ **Total Time:** `{total_time}`\n"
-        f"📌 **Auto-Pinned:** `{'Yes' if should_pin else 'No'}`",
-        buttons=None
-    )
+        total_time = format_eta(time.time() - bc_start_time)
+        header_title = "🛑 **BROADCAST ABORTED BY ADMIN**" if broadcast_cancel_flag else "✅ **VIP BROADCAST COMPLETED!**"
+        final_text = (
+            f"{header_title}\n"
+            f"➖➖➖➖➖➖➖➖➖➖➖➖\n"
+            f"👥 **Processed:** `{processed} / {total_targets}`\n"
+            f"✅ **Delivered:** `{success}`\n"
+            f"❌ **Failed/Blocked:** `{fail}`\n"
+            f"⏭ **Skipped:** `{skip}`\n"
+            f"⏱ **Total Time:** `{total_time}`\n"
+            f"📌 **Auto-Pinned:** `{'Yes' if should_pin else 'No'}`"
+        )
+        try:
+            await status_msg.edit(final_text, buttons=None)
+        except FloodWaitError as e:
+            await asyncio.sleep(min(int(e.seconds) + 1, 30))
+            try:
+                await status_msg.edit(final_text, buttons=None)
+            except Exception:
+                await event.respond(final_text)
+        except Exception:
+            await event.respond(final_text)
+    finally:
+        broadcast_running = False
 
 # =====================================================================
 # 🧠 MASTER INTERACTIVE STATE PROCESSOR (HANDLES ALL ADMIN INPUTS)
@@ -1496,7 +1642,7 @@ async def handle_admin_chat_state(event):
             ]
         ]
         await scan_msg.edit(
-            f"🕵️‍♂️ **VIP USER DOSSIER**\n"
+            f"🕵️♂️ **VIP USER DOSSIER**\n"
             f"➖➖➖➖➖➖➖➖➖➖➖➖\n"
             f"👤 **Name:** `{u_name}`\n"
             f"🔗 **Username:** `{u_handle}`\n"
@@ -1528,25 +1674,25 @@ async def handle_admin_chat_state(event):
         admin_chat_state.pop(admin_id, None)
         try:
             access_hash = tracked_users.get(target_id, 0)
-            peer = InputPeerUser(target_id, access_hash) if access_hash else target_id
+            peer = await resolve_user_peer(target_id, access_hash)
             if event.text:
                 await client.send_message(peer, event.text, file=event.media)
             elif event.media:
                 await client.send_message(peer, file=event.media)
             user_chat_state[target_id] = True
             await event.respond(f"✅ **VIP Message successfully delivered to `{target_id}`!**")
-        except UserIsBlockedError:
+        except (UserIsBlockedError, UserDeactivatedError, UserDeactivatedBanError, InputUserDeactivatedError):
             blocked_users.add(target_id)
             save_user(target_id, tracked_users.get(target_id, 0), blocked=True)
             await event.respond("❌ **Delivery Failed:** User blocked the bot.")
         except Exception as e:
             await event.respond(f"❌ **Delivery Failed:** Invalid ID or user hasn't started the bot (`{e}`).")
 
-    # 3. Broadcast Execution
+    # 3. Broadcast Execution (Launched as background task so event loop & Stop button never block)
     elif step == "broadcast_send":
         should_pin = state.get("pin", False)
         admin_chat_state.pop(admin_id, None)
-        await execute_broadcast(event, should_pin)
+        asyncio.create_task(execute_broadcast(event, should_pin))
 
     # 4. Set / Add Module Button File
     elif step == "set_btn_file":
@@ -1640,7 +1786,7 @@ async def handle_admin_chat_state(event):
         kw = state["keyword"]
         admin_chat_state.pop(admin_id, None)
         auto_replies[kw] = raw_txt
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with get_db_conn() as conn:
             conn.execute("INSERT OR REPLACE INTO auto_replies (keyword, response) VALUES (?, ?)", (kw, raw_txt))
         await event.reply(f"✅ **Auto-Reply Saved!**\n🔑 `{kw}` ➡ {raw_txt}")
 
@@ -1652,7 +1798,7 @@ async def handle_admin_chat_state(event):
         admin_chat_state.pop(admin_id, None)
         if new_aid not in ADMIN_IDS:
             ADMIN_IDS.append(new_aid)
-            with sqlite3.connect(str(DB_PATH)) as conn:
+            with get_db_conn() as conn:
                 conn.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (new_aid,))
         await event.reply(f"✅ **New Admin Added:** `{new_aid}`")
 
@@ -1665,7 +1811,7 @@ async def handle_admin_chat_state(event):
         if b_uid in ADMIN_IDS:
             return await event.reply("❌ Admin ko ban nahi kar sakte!")
         banned_users.add(b_uid)
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with get_db_conn() as conn:
             conn.execute("INSERT OR IGNORE INTO banned (user_id) VALUES (?)", (b_uid,))
         await event.reply(f"🚫 **User `{b_uid}` has been BANNED!**")
 
@@ -1676,7 +1822,7 @@ async def handle_admin_chat_state(event):
         ub_uid = int(raw_txt)
         admin_chat_state.pop(admin_id, None)
         banned_users.discard(ub_uid)
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with get_db_conn() as conn:
             conn.execute("DELETE FROM banned WHERE user_id=?", (ub_uid,))
         await event.reply(f"✅ **User `{ub_uid}` has been UNBANNED!**")
 
@@ -1739,7 +1885,7 @@ async def send_dm_manual(event):
     target_uid = int(event.pattern_match.group(1))
     text_msg = event.pattern_match.group(2)
     try:
-        peer = InputPeerUser(target_uid, tracked_users.get(target_uid, 0))
+        peer = await resolve_user_peer(target_uid, tracked_users.get(target_uid, 0))
         if event.is_reply:
             reply_msg = await event.get_reply_message()
             await client.send_message(peer, text_msg or reply_msg.text or "", file=reply_msg.media)
@@ -1747,7 +1893,7 @@ async def send_dm_manual(event):
             await client.send_message(peer, text_msg.strip())
         user_chat_state[target_uid] = True
         await event.reply(f"✅ **Message successfully delivered to `{target_uid}`!**")
-    except UserIsBlockedError:
+    except (UserIsBlockedError, UserDeactivatedError, UserDeactivatedBanError, InputUserDeactivatedError):
         blocked_users.add(target_uid)
         save_user(target_uid, tracked_users.get(target_uid, 0), blocked=True)
         await event.reply("❌ `[Error] Delivery Failed: User blocked the bot.`")
@@ -1762,7 +1908,7 @@ async def broadcast_slash(event):
     if not text and not event.is_reply:
         return await event.reply("❌ Message text dein ya kisi message par reply karein.")
     reply_msg = await event.get_reply_message() if event.is_reply else None
-    await execute_broadcast(event, should_pin, manual_text=text if not reply_msg else None, reply_msg_obj=reply_msg)
+    asyncio.create_task(execute_broadcast(event, should_pin, manual_text=text if not reply_msg else None, reply_msg_obj=reply_msg))
 
 @client.on(events.NewMessage(pattern=r"^/setmsg(\d+)(?:\s+(.+))?"))
 @admin_only
@@ -1777,7 +1923,7 @@ async def setmsg_slash(event):
     else:
         if step in saved_messages:
             del saved_messages[step]
-            with sqlite3.connect(str(DB_PATH)) as conn:
+            with get_db_conn() as conn:
                 conn.execute("DELETE FROM messages WHERE step=?", (step,))
             return await event.reply(f"🗑 Sequence step {step} hata diya gaya hai.")
         return await event.reply("❌ Text provide karein ya kisi message par reply karein.")
@@ -1831,7 +1977,7 @@ async def add_admin_slash(event):
     if new_admin_id in ADMIN_IDS:
         return await event.reply(f"⚠️ User `{new_admin_id}` pehle se hi admin hai.")
     ADMIN_IDS.append(new_admin_id)
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with get_db_conn() as conn:
         conn.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (new_admin_id,))
     await event.reply(f"✅ Naya admin add ho gaya hai: `{new_admin_id}`")
 
@@ -1843,7 +1989,7 @@ async def del_admin_slash(event):
         return await event.reply("❌ Root Admin ko remove nahi kiya ja sakta.")
     if target_admin_id in ADMIN_IDS:
         ADMIN_IDS.remove(target_admin_id)
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with get_db_conn() as conn:
         conn.execute("DELETE FROM admins WHERE user_id=?", (target_admin_id,))
     await event.reply(f"🗑 Admin privileges hata di gayi hain: `{target_admin_id}`")
 
@@ -1862,7 +2008,7 @@ async def set_auto_reply_slash(event):
     keyword = event.pattern_match.group(1).strip().lower()
     response = event.pattern_match.group(2).strip()
     auto_replies[keyword] = response
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with get_db_conn() as conn:
         conn.execute("INSERT OR REPLACE INTO auto_replies (keyword, response) VALUES (?, ?)", (keyword, response))
     await event.reply(f"✅ **Auto-Reply Saved:** `{keyword}`")
 
@@ -1872,7 +2018,7 @@ async def del_auto_reply_slash(event):
     keyword = event.pattern_match.group(1).strip().lower()
     if keyword in auto_replies:
         del auto_replies[keyword]
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with get_db_conn() as conn:
             conn.execute("DELETE FROM auto_replies WHERE keyword=?", (keyword,))
         await event.reply(f"🗑 Auto-reply deleted: `{keyword}`")
     else:
@@ -1928,7 +2074,7 @@ def restore_from_dict(data: dict):
     auto_replies = data.get("auto_replies", {})
     db_admins = data.get("db_admins", [])
 
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with get_db_conn() as conn:
         conn.execute("DELETE FROM users")
         conn.execute("DELETE FROM messages")
         conn.execute("DELETE FROM button_msgs")
@@ -2054,7 +2200,7 @@ async def seamless_chat_handler(event):
                 target_uid = int(match.group(1))
                 try:
                     access_hash = tracked_users.get(target_uid, 0)
-                    peer = InputPeerUser(target_uid, access_hash) if access_hash else target_uid 
+                    peer = await resolve_user_peer(target_uid, access_hash)
                         
                     if event.raw_text: await client.send_message(peer, event.raw_text, file=event.media)
                     elif event.media: await client.send_message(peer, file=event.media)
@@ -2067,7 +2213,7 @@ async def seamless_chat_handler(event):
                     try: await admin_feedback.delete()
                     except Exception: pass
                         
-                except UserIsBlockedError:
+                except (UserIsBlockedError, UserDeactivatedError, UserDeactivatedBanError, InputUserDeactivatedError):
                     blocked_users.add(target_uid)
                     save_user(target_uid, tracked_users.get(target_uid, 0), blocked=True)
                     await event.reply("❌ `[Error] Transmission failed: User blocked the bot.`")
